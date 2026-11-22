@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -338,9 +339,33 @@ func TestSyncStatusUnsupportedHostIsKnownScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The app bundle is the install evidence; the data directory alone is only
-	// a leftover workspace.
-	if err := os.MkdirAll(filepath.Join(home, "Applications", "Cursor.app"), 0o700); err != nil {
-		t.Fatal(err)
+	// a leftover workspace. Each platform probes its own install shape, so the
+	// fixture must create the candidate the detector actually looks for.
+	switch runtime.GOOS {
+	case "darwin":
+		if err := os.MkdirAll(filepath.Join(home, "Applications", "Cursor.app"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	case "windows":
+		localAppData := os.Getenv("LOCALAPPDATA")
+		if localAppData == "" {
+			localAppData = filepath.Join(home, "AppData", "Local")
+		}
+		program := filepath.Join(localAppData, "Programs", "Cursor", "Cursor.exe")
+		if err := os.MkdirAll(filepath.Dir(program), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(program, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	default:
+		desktop := filepath.Join(home, ".local", "share", "applications", "Cursor.desktop")
+		if err := os.MkdirAll(filepath.Dir(desktop), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(desktop, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	payload := runStatusJSON(t, filepath.Join(env.base, "cursor.db"))
 	item := harnessItem(t, payload, "cursor")
