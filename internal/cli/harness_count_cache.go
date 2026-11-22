@@ -24,23 +24,26 @@ import (
 
 const (
 	harnessCountCachePrefix = "harness_count_cache:"
-	// Version 2 excludes rows whose counts may have been inferred from global growth.
-	harnessCountCacheVersion = 2
-	// The TTL avoids rescanning active stores on every status poll. A vault count
-	// change invalidates the cache because the changed units have no harness identity.
-	harnessCountCacheTTL = 300
+	// Version 5 applies the ingest bound inside the scan page (out-of-scope
+	// turns no longer consume the budget or poison Complete), so rows written by
+	// the previous scan semantics cannot be reused.
+	harnessCountCacheVersion = 5
 )
 
 type harnessCountCache struct {
 	Version      int   `json:"version"`
 	Fingerprint  int64 `json:"fp"`
 	VaultUnits   int   `json:"vault"`
+	Since        int64 `json:"since"`
 	ComputedAt   int64 `json:"computed_at"`
 	Sessions     int   `json:"sessions"`
 	LocalTurns   int   `json:"local_turns"`
 	Synced       int   `json:"synced"`
 	Unsynced     int   `json:"unsynced"`
+	OutOfScope   int   `json:"out_of_scope"`
+	Incomplete   int   `json:"incomplete"`
 	LastActiveAt int64 `json:"last_active_at"`
+	Complete     bool  `json:"complete"`
 }
 
 // harnessStoreFingerprint summarises "has this harness store changed" without
@@ -78,7 +81,7 @@ func harnessStoreFingerprint(home, harnessID string) int64 {
 	return newest
 }
 
-func loadHarnessCountCache(db *sql.DB, harnessID, home string, vaultUnits int) (harnessCountCache, bool) {
+func loadHarnessCountCache(db *sql.DB, harnessID, home string, vaultUnits int, since int64) (harnessCountCache, bool) {
 	if db == nil || vaultUnits <= 0 {
 		return harnessCountCache{}, false
 	}
@@ -90,19 +93,19 @@ func loadHarnessCountCache(db *sql.DB, harnessID, home string, vaultUnits int) (
 	if err := json.Unmarshal(raw, &cached); err != nil || cached.Version != harnessCountCacheVersion {
 		return harnessCountCache{}, false
 	}
-	// The scan classifies every turn it returns as synced or unsynced, so the cached
-	// turn total must equal their sum; a row written before that total was memoised
-	// fails this identity and is recomputed instead of surfacing as zero turns.
+	// The scan classifies every importable turn as synced or unsynced, so the
+	// cached turn total must equal their sum; a row written before that total was
+	// memoised fails this identity and is recomputed instead of surfacing as zero.
 	if cached.LocalTurns != cached.Synced+cached.Unsynced {
 		return harnessCountCache{}, false
 	}
-	if cached.VaultUnits != vaultUnits {
+	if cached.VaultUnits != vaultUnits || cached.Since != since {
 		return harnessCountCache{}, false
 	}
-	withinTTL := time.Now().Unix()-cached.ComputedAt < harnessCountCacheTTL
-	if withinTTL {
-		return cached, true
-	}
+	// Check the store fingerprint on every read, not only after the TTL: a new
+	// transcript (or a new turn appended to an existing one) changes the counts
+	// immediately, and serving the TTL-cached numbers would hide an unsynced
+	// host until the timer expired. Stat/glob is cheap compared with the scan.
 	fingerprint := harnessStoreFingerprint(home, harnessID)
 	if fingerprint == 0 || cached.Fingerprint != fingerprint {
 		return harnessCountCache{}, false
@@ -110,7 +113,7 @@ func loadHarnessCountCache(db *sql.DB, harnessID, home string, vaultUnits int) (
 	return cached, true
 }
 
-func storeHarnessCountCache(db *sql.DB, harnessID, home string, vaultUnits, sessions, synced, unsynced, localTurns int, lastActiveAt int64) {
+func storeHarnessCountCache(db *sql.DB, harnessID, home string, vaultUnits int, since int64, sessions, synced, unsynced, localTurns, outOfScope, incomplete int, lastActiveAt int64, complete bool) {
 	if db == nil {
 		return
 	}
@@ -119,8 +122,11 @@ func storeHarnessCountCache(db *sql.DB, harnessID, home string, vaultUnits, sess
 		return
 	}
 	raw, err := json.Marshal(harnessCountCache{
-		Version: harnessCountCacheVersion, Fingerprint: fingerprint, VaultUnits: vaultUnits, ComputedAt: time.Now().Unix(),
-		Sessions: sessions, LocalTurns: localTurns, Synced: synced, Unsynced: unsynced, LastActiveAt: lastActiveAt,
+		Version: harnessCountCacheVersion, Fingerprint: fingerprint, VaultUnits: vaultUnits, Since: since,
+		ComputedAt: time.Now().Unix(),
+		Sessions:   sessions, LocalTurns: localTurns, Synced: synced, Unsynced: unsynced,
+		OutOfScope: outOfScope, Incomplete: incomplete, LastActiveAt: lastActiveAt,
+		Complete: complete,
 	})
 	if err != nil {
 		return

@@ -99,6 +99,13 @@ episodic:
     pageSub: 仅由 Harness 对话记录构成：后台自动同步 + 历史会话对齐导入；本地目录文件永不进入本层（文件属于 L1 文档与代码）
     reconcileSuccess: 'L2 对齐完成：导入 Harness 对话 +{har} 轮 · 同步 +{epi}（Harness 对话只进 L2，不进 L1）'
     reconcileSuccessLocal: 'L2 本地对齐完成：导入 Harness 对话 +{har} 轮（本地模式零云端请求）'
+    subagentsExcludedLbl: '子代理来源未纳入 {n} 个'
+    subagentsExcludedHint: '自动采集按公开覆盖范围读取主会话；子代理对话不保证纳入，不属于读取失败，也不计入待同步轮次。'
+    turnsScopeHint: '轮次仅统计可导入对话：{n} 条历史单元早于 sync.since 不导入；{incomplete} 条尚未确认完成。'
+    noTurnScannerLbl: '无自动对话扫描器'
+    noTurnScannerHint: '该宿主尚未接入本地对话读取器，因此不参与 L2 轮次对齐，也不会计入待同步。'
+    doubaoExportLbl: '豆包导出目录'
+    doubaoExportHint: '把豆包对话导出为 JSONL 放到 ~/Doubao/exports/（每个会话一个文件），后台扫描器会自动导入。'
     unitsTitle: 会话记录单元（L2）
     syncActiveHarnessBtn: '同步当前 Harness 对话 ({name})'
     syncAllHarnessesBtn: 同步本机全部 Harness 对话
@@ -130,9 +137,9 @@ noetic:
     reconcileSuccess: 'L3 对齐完成：+{noe} 条检索沉淀（来自 Agent 检索线索 + 引用证据）'
     reconcileSuccessLocal: 'L3 本地模式无需对齐：检索沉淀由 Agent 检索在本地自动写入（零云端请求）'
     unitsTitle: 检索沉淀（L3）
-    purgeStaleBtn: '清理已失效 ({n})'
-    purgeStaleConfirm: '确认彻底清除 {n} 条已失效（stale）的检索沉淀吗？'
-    purgeStaleSuccess: 已清理全部已失效（stale）条目
+    purgeStaleBtn: '清理已失效/被替代 ({n})'
+    purgeStaleConfirm: '确认彻底清除 {n} 条已失效/被替代的检索沉淀吗？'
+    purgeStaleSuccess: 已清理全部失效/被替代条目
     goRecallBtn: 打开检索调试台
     replayBtn: 在调试台重放
 overview:
@@ -225,7 +232,7 @@ browser:
     refreshBtn: 刷新
     statusAll: 全部状态
     statusActive: 有效 active
-    statusStale: 失效 stale
+    statusStale: 失效 / 被替代
     colStatus: 状态
     colFileChunk: 文件 · 分块坐标
     empty: 暂无记忆单元（可先在 L1 文档与代码挂载目录；L3 由 Agent 检索自动沉淀）
@@ -313,7 +320,7 @@ eval:
     clearEval: 清空评测域
     intro1Title: 1. 权威基准语料：LoCoMo 10 组长程对话 (ACL 2024)
     intro1Badge: SHA256 完整性已锁死
-    intro1Body: 评测采用 Maharana et al. 发布的 10 组跨月长程多会话对话（共 5,882 轮交互）与上游官方题集 cat1-4 全集（1,540 题：Cat 4 单跳 841 · Cat 2 时序 321 · Cat 1 多跳 282 · Cat 3 开放域 96，随附官方证据）。基准语料由上游项目按 CC BY-NC 4.0 发布、不随产品分发：可运行 rmem eval --fetch locomo --accept-upstream-license 一条命令获取并本地重建官方题集，或从上游获取 locomo10.json 后自备导入；每次运行前自动校验 SHA-256，可在本机复现。ATM-Bench 语料同样可一条命令获取：rmem eval --fetch atm --accept-upstream-license。
+    intro1Body: 评测采用 Maharana et al. 发布的 10 组跨月长程多会话对话（共 5,882 轮交互）与上游官方题集 cat1-4 全集（1,540 题：Cat 4 单跳 841 · Cat 2 时序 321 · Cat 1 多跳 282 · Cat 3 开放域 96，随附官方证据）。基准语料由上游项目按 CC BY-NC 4.0 发布、不随产品分发：可运行 rmem eval --fetch-only --fetch locomo --accept-upstream-license 一条命令获取并本地重建官方题集，或从上游获取 locomo10.json 后自备导入；每次运行前自动校验 SHA-256，可在本机复现。ATM-Bench 语料同样可一条命令获取：rmem eval --fetch-only --fetch atm --accept-upstream-license。
     intro2Title: 2. 零偏差同尺协议：locomo-backboard 冻结协议对
     intro2Badge: 三枚 SHA1 钉只读保护
     intro2Body: 内置评测协议与 locomo-backboard 商业榜单 1:1 严格同尺，逐字节复刻官方 local-qa-judge（locomo-frozen-2026-10-11）：由 locomo-answer（答题智能体）与 locomo-judge（1,694 字节判官智能体，输出 CORRECT / WRONG）组成。您既可 0 成本断网秒级复算纯检索召回率，也可配置自己的 LLM（自付 Token 成本）复现端到端问答得分。

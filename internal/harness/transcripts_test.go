@@ -120,6 +120,7 @@ func TestTranscriptGlobsOtherHostsUnchanged(t *testing.T) {
 		},
 		"codebuddy": {filepath.Join(home, ".codebuddy", "projects", "*", "*.jsonl"), filepath.Join(home, ".codebuddy", "projects", "*", "sessions", "*.jsonl")},
 		"workbuddy": {filepath.Join(home, ".workbuddy", "projects", "*", "*.jsonl"), filepath.Join(home, ".workbuddy", "projects", "*", "sessions", "*.jsonl")},
+		"doubao":    {filepath.Join(home, "Doubao", "exports", "*.jsonl"), filepath.Join(home, ".doubao", "exports", "*.jsonl")},
 	}
 	for id, want := range cases {
 		got := TranscriptGlobs(home, id)
@@ -132,8 +133,8 @@ func TestTranscriptGlobsOtherHostsUnchanged(t *testing.T) {
 			}
 		}
 	}
-	if got := TranscriptGlobs(home, "doubao"); got != nil {
-		t.Fatalf("unsupported host globs = %v, want nil", got)
+	if got := TranscriptGlobs(home, "doubao"); len(got) != 2 {
+		t.Fatalf("doubao export globs = %v", got)
 	}
 }
 

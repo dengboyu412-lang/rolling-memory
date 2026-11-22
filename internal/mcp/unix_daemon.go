@@ -917,8 +917,26 @@ func spawnUnixDaemonProcess(sockPath string, cfg *config.Config) error {
 	return nil
 }
 
-// CallUnixDaemonRecall executes a recall request using the caller's resolved configuration.
+// CallUnixDaemonRecall forwards one recall over the shared daemon socket.
+// A daemon can retire between the health probe and the request (binary
+// replacement or idle exit), leaving the caller on a closing listener. Recall is
+// read-only and the deferred L3 write collapses by noetic id, so one transport
+// retry is safe and turns a transient EOF into a served call.
 func CallUnixDaemonRecall(ctx context.Context, sockPath string, cfg *config.Config, payload UnixRecallPayload) (*UnixRecallResponse, error) {
+	resp, err := callUnixDaemonRecallOnce(ctx, sockPath, cfg, payload)
+	if err == nil || ctx.Err() != nil || !retryableDaemonTransport(err) {
+		return resp, err
+	}
+	return callUnixDaemonRecallOnce(ctx, sockPath, cfg, payload)
+}
+
+func retryableDaemonTransport(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) ||
+		errors.Is(err, net.ErrClosed)
+}
+
+func callUnixDaemonRecallOnce(ctx context.Context, sockPath string, cfg *config.Config, payload UnixRecallPayload) (*UnixRecallResponse, error) {
 	if sockPath == "" {
 		sockPath = DefaultUnixSocketPath()
 	} else {

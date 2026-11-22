@@ -46,13 +46,26 @@ type HarnessEnvItem struct {
 	// TurnsScanSupported is false for harnesses this build can discover sessions
 	// for but cannot read turn content from (compressed or unsupported transcript
 	// schema): their 0/0 turn counts mean "not counted", not "no history".
-	TurnsScanSupported bool   `json:"turns_scan_supported"`
-	SessionsCount      int    `json:"sessions_count"`
-	LocalTurnsCount    int    `json:"local_turns_count"`
-	SyncedTurnsCount   int    `json:"synced_turns_count"`
-	UnsyncedTurnsCount int    `json:"unsynced_turns_count"`
-	LastActiveAt       int64  `json:"last_active_at"`
-	LastActiveText     string `json:"last_active_text"`
+	TurnsScanSupported bool `json:"turns_scan_supported"`
+	SessionsCount      int  `json:"sessions_count"`
+	// LocalTurnsCount is the importable turn count: completed turns inside the
+	// configured sync.since bound. Out-of-bound history and turns without
+	// confirmed completion are reported separately and never counted as pending
+	// work the importer would not perform.
+	LocalTurnsCount    int `json:"local_turns_count"`
+	SyncedTurnsCount   int `json:"synced_turns_count"`
+	UnsyncedTurnsCount int `json:"unsynced_turns_count"`
+	// OutOfScopeTurnsCount counts scanned turns older than sync.since.
+	OutOfScopeTurnsCount int `json:"out_of_scope_turns_count,omitempty"`
+	// IncompleteTurnsCount counts turns without confirmed successful completion
+	// (an open tail or an aborted run). They are not importable by contract.
+	IncompleteTurnsCount int `json:"incomplete_turns_count,omitempty"`
+	// ExcludedSubagentSourcesCount counts host-side subagent sources outside
+	// automatic coverage. This is a documented scope limit surfaced as a count,
+	// not an unreadable source.
+	ExcludedSubagentSourcesCount int    `json:"excluded_subagent_sources_count,omitempty"`
+	LastActiveAt                 int64  `json:"last_active_at"`
+	LastActiveText               string `json:"last_active_text"`
 }
 
 // HealthCheckSubItem is one dimension of the Memory Health score.
@@ -77,6 +90,7 @@ type LayerAlignmentStat struct {
 	TrackedFilesCount    int    `json:"tracked_files_count,omitempty"`
 	DirtyFilesCount      int    `json:"dirty_files_count,omitempty"`
 	StaleCount           int    `json:"stale_count,omitempty"`
+	SupersededCount      int    `json:"superseded_count,omitempty"`
 	TotalPendingSync     int    `json:"total_pending_sync"`
 	AlignmentPct         int    `json:"alignment_pct"`
 	AlignmentKnown       bool   `json:"alignment_known"`
@@ -133,25 +147,29 @@ type EnvHealthAndSyncStatus struct {
 // ReconcileReport is the execution receipt for `rolling-memory sync reconcile --json`
 // and `/admin/plugin/rolling-memory/sync/reconcile`.
 type ReconcileReport struct {
-	Layer                        string                 `json:"layer"`
-	TargetHarness                string                 `json:"target_harness"`
-	EpisodicImportedFromHar      int                    `json:"episodic_imported_from_harness"`
-	EpisodicIndexesBackfilled    int                    `json:"episodic_indexes_backfilled"`
-	EpisodicIndexScanLimit       int                    `json:"episodic_index_scan_limit_per_harness"`
-	EpisodicIndexScanned         int                    `json:"episodic_index_scanned"`
-	EpisodicIndexSourceChanged   int                    `json:"episodic_index_source_changed"`
-	EpisodicIndexPointerMismatch int                    `json:"episodic_index_pointer_mismatch"`
-	EpisodicIndexUnverified      int                    `json:"episodic_index_unverified"`
-	EpisodicIndexCompatible      int                    `json:"episodic_index_compatible"`
-	EpisodicIndexIncompatible    int                    `json:"episodic_index_incompatible"`
-	EpisodicIndexMissing         int                    `json:"episodic_index_missing"`
-	EpisodicIndexCorrupt         int                    `json:"episodic_index_corrupt"`
-	EpisodicIndexNeedsRebuild    int                    `json:"episodic_index_needs_rebuild"`
-	BackgroundSyncedFiles        int                    `json:"background_synced_files"`
-	TotalReconciled              int                    `json:"total_reconciled"`
-	ElapsedMS                    int                    `json:"elapsed_ms"`
-	Warnings                     []string               `json:"warnings,omitempty"`
-	Status                       EnvHealthAndSyncStatus `json:"status"`
+	Layer                        string `json:"layer"`
+	TargetHarness                string `json:"target_harness"`
+	EpisodicImportedFromHar      int    `json:"episodic_imported_from_harness"`
+	EpisodicIndexesBackfilled    int    `json:"episodic_indexes_backfilled"`
+	EpisodicIndexScanLimit       int    `json:"episodic_index_scan_limit_per_harness"`
+	EpisodicIndexScanned         int    `json:"episodic_index_scanned"`
+	EpisodicIndexSourceChanged   int    `json:"episodic_index_source_changed"`
+	EpisodicIndexPointerMismatch int    `json:"episodic_index_pointer_mismatch"`
+	EpisodicIndexUnverified      int    `json:"episodic_index_unverified"`
+	EpisodicIndexCompatible      int    `json:"episodic_index_compatible"`
+	EpisodicIndexIncompatible    int    `json:"episodic_index_incompatible"`
+	EpisodicIndexMissing         int    `json:"episodic_index_missing"`
+	EpisodicIndexCorrupt         int    `json:"episodic_index_corrupt"`
+	EpisodicIndexNeedsRebuild    int    `json:"episodic_index_needs_rebuild"`
+	BackgroundSyncedFiles        int    `json:"background_synced_files"`
+	// ExcludedSubagentSources counts host-side subagent transcripts/sessions
+	// that are outside automatic coverage by design. They are data completeness
+	// scope, not a read failure, and never enter Warnings.
+	ExcludedSubagentSources int                    `json:"excluded_subagent_sources,omitempty"`
+	TotalReconciled         int                    `json:"total_reconciled"`
+	ElapsedMS               int                    `json:"elapsed_ms"`
+	Warnings                []string               `json:"warnings,omitempty"`
+	Status                  EnvHealthAndSyncStatus `json:"status"`
 }
 
 // candidateEpisodicTurn represents one extracted User+Assistant conversational turn from a harness.
@@ -449,6 +467,7 @@ func inspectEnvHealth(ctx context.Context, memory *facade.Memory, harnessFilter 
 	localBackground := map[string]bool{}
 	localNoeticActive := map[string]bool{}
 	localNoeticStaleCount := 0
+	localNoeticSupersededCount := 0
 	mountedDirsCount := 0
 	trackedFilesCount := 0
 	dirtyFilesCount := 0
@@ -494,9 +513,15 @@ func inspectEnvHealth(ctx context.Context, memory *facade.Memory, harnessFilter 
 			for rows.Next() {
 				var nid, st string
 				if rows.Scan(&nid, &st) == nil && strings.TrimSpace(nid) != "" {
-					if strings.EqualFold(strings.TrimSpace(st), "active") {
+					switch strings.ToLower(strings.TrimSpace(st)) {
+					case "active":
 						localNoeticActive[nid] = true
-					} else {
+					case "superseded":
+						// Superseding is the normal trace-dedupe lifecycle: the
+						// newer trace carries the same cue. It is not a failed or
+						// stale imprint and must not degrade health.
+						localNoeticSupersededCount++
+					default:
 						localNoeticStaleCount++
 					}
 				}
@@ -562,6 +587,21 @@ func inspectEnvHealth(ctx context.Context, memory *facade.Memory, harnessFilter 
 
 	totalHarnessUnsynced := 0
 	harnessAlignmentKnown := withTurnCounts
+	// The ingest lower bound is part of the vault's configured collection scope:
+	// turns older than sync.since are intentionally never imported, so they are
+	// not pending work and must not degrade alignment. A malformed bound keeps
+	// the status honest by marking alignment unknown instead of guessing.
+	cfgPath := ""
+	if memory != nil && memory.Config != nil {
+		cfgPath = memory.Config.Path
+	}
+	since, sinceErr := EpisodicScanSince(cfgPath)
+	if sinceErr != nil {
+		harnessAlignmentKnown = false
+	}
+	// The harness count cache keys on the total local vault unit count: a new
+	// import changes attribution, so cached per-harness counts may not be reused.
+	vaultUnits := len(localEpisodic) + len(localBackground) + len(localNoeticActive)
 	endScanStage := stageStart(progressStageScan, map[string]any{"harnesses": len(defs)})
 
 	for _, d := range defs {
@@ -576,29 +616,69 @@ func inspectEnvHealth(ctx context.Context, memory *facade.Memory, harnessFilter 
 		w := wiredMap[d.ID]
 		sessionsCnt, turns, lastTS := 0, []candidateEpisodicTurn(nil), int64(0)
 		syncedCnt, unsyncedCnt, localTurnsCnt := 0, 0, 0
+		outOfScopeCnt, incompleteCnt, excludedSubagentCnt := 0, 0, 0
 		if withTurnCounts {
-			var complete bool
-			sessionsCnt, turns, lastTS, complete = scanHarnessTurnsWithCoverageContext(ctx, home, d.ID, scope, 2000)
-			if !complete {
+			var excludedKnown bool
+			excludedSubagentCnt, excludedKnown = countExcludedSubagentSources(ctx, home, d.ID)
+			if !excludedKnown {
 				harnessAlignmentKnown = false
 			}
-			for _, turn := range turns {
-				if localEpisodic[turn.DocID] || deletedEpisodic[turn.DocID] {
-					syncedCnt++
-				} else {
-					unsyncedCnt++
+			cached, cacheOK := loadHarnessCountCache(healthDB, d.ID, home, vaultUnits, since)
+			if cacheOK {
+				sessionsCnt, localTurnsCnt = cached.Sessions, cached.LocalTurns
+				syncedCnt, unsyncedCnt = cached.Synced, cached.Unsynced
+				outOfScopeCnt, incompleteCnt = cached.OutOfScope, cached.Incomplete
+				lastTS = cached.LastActiveAt
+				if !cached.Complete {
+					harnessAlignmentKnown = false
 				}
+				emitStatusProgress(progressStageScan, "step", map[string]any{
+					"harness": d.ID, "phase": "done", "cached": true,
+					"local_turns": localTurnsCnt, "synced": syncedCnt, "unsynced": unsyncedCnt,
+					"out_of_scope": outOfScopeCnt, "incomplete": incompleteCnt,
+					"excluded_subagents": excludedSubagentCnt,
+				})
+			} else {
+				var complete bool
+				sessionsCnt, turns, lastTS, complete, outOfScopeCnt = scanHarnessTurnsWithCoverageBoundContext(ctx, home, d.ID, scope, 2000, since)
+				if !complete {
+					harnessAlignmentKnown = false
+				}
+				for _, turn := range turns {
+					// A turn without confirmed completion is never importable (open
+					// tail or aborted run); out-of-bound history is outside the
+					// configured collection window. Neither is pending work.
+					if !turn.Completed {
+						incompleteCnt++
+						continue
+					}
+					if episodicOccurredBefore(turn.OccurredAt, since) {
+						outOfScopeCnt++
+						continue
+					}
+					if localEpisodic[turn.DocID] || deletedEpisodic[turn.DocID] {
+						syncedCnt++
+					} else {
+						unsyncedCnt++
+					}
+				}
+				localTurnsCnt = syncedCnt + unsyncedCnt
+				if healthDB != nil {
+					storeHarnessCountCache(healthDB, d.ID, home, vaultUnits, since, sessionsCnt, syncedCnt, unsyncedCnt, localTurnsCnt, outOfScopeCnt, incompleteCnt, lastTS, complete)
+				}
+				emitStatusProgress(progressStageScan, "step", map[string]any{
+					"harness": d.ID, "phase": "done", "cached": false,
+					"local_turns": localTurnsCnt, "synced": syncedCnt, "unsynced": unsyncedCnt,
+					"out_of_scope": outOfScopeCnt, "incomplete": incompleteCnt,
+					"excluded_subagents": excludedSubagentCnt,
+				})
 			}
-			localTurnsCnt = len(turns)
-			emitStatusProgress(progressStageScan, "step", map[string]any{
-				"harness": d.ID, "phase": "done", "cached": false,
-				"local_turns": localTurnsCnt, "synced": syncedCnt, "unsynced": unsyncedCnt,
-			})
 		}
 		totalHarnessUnsynced += unsyncedCnt
-		if (detected || d.ID == activeID) && !harnessTurnsScannable(d.ID) {
-			harnessAlignmentKnown = false
-		}
+		// A detected host without a turn reader is a documented collection-scope
+		// limitation, not an unreadable source: the harness item reports
+		// turns_scan_supported=false and the panel labels it. It must not hold
+		// the supported scope at "alignment unknown" forever.
 		lastTxt := "-"
 		if lastTS > 0 {
 			lastTxt = time.Unix(lastTS, 0).Format("2006-01-02 15:04:05")
@@ -609,22 +689,25 @@ func inspectEnvHealth(ctx context.Context, memory *facade.Memory, harnessFilter 
 		// host's own app/launcher, or a live attachment qualify.
 		installed := detected && (sessionsCnt > 0 || lastTS > 0 || liveHosts[d.ID] || harness.AppPresent(d.ID, home))
 		out.Harnesses = append(out.Harnesses, HarnessEnvItem{
-			ID:                    d.ID,
-			Label:                 d.Label,
-			Detected:              installed,
-			Active:                liveHosts[d.ID],
-			SkillWired:            w["skill"],
-			MCPWired:              w["mcp"],
-			HooksWired:            w["hooks"],
-			HooksSupported:        d.HooksKind != "",
-			SessionsScanSupported: harnessSessionsScannable(d.ID),
-			TurnsScanSupported:    harnessTurnsScannable(d.ID),
-			SessionsCount:         sessionsCnt,
-			LocalTurnsCount:       localTurnsCnt,
-			SyncedTurnsCount:      syncedCnt,
-			UnsyncedTurnsCount:    unsyncedCnt,
-			LastActiveAt:          lastTS,
-			LastActiveText:        lastTxt,
+			ID:                           d.ID,
+			Label:                        d.Label,
+			Detected:                     installed,
+			Active:                       liveHosts[d.ID],
+			SkillWired:                   w["skill"],
+			MCPWired:                     w["mcp"],
+			HooksWired:                   w["hooks"],
+			HooksSupported:               d.HooksKind != "",
+			SessionsScanSupported:        harnessSessionsScannable(d.ID),
+			TurnsScanSupported:           harnessTurnsScannable(d.ID),
+			SessionsCount:                sessionsCnt,
+			LocalTurnsCount:              localTurnsCnt,
+			SyncedTurnsCount:             syncedCnt,
+			UnsyncedTurnsCount:           unsyncedCnt,
+			OutOfScopeTurnsCount:         outOfScopeCnt,
+			IncompleteTurnsCount:         incompleteCnt,
+			ExcludedSubagentSourcesCount: excludedSubagentCnt,
+			LastActiveAt:                 lastTS,
+			LastActiveText:               lastTxt,
 		})
 	}
 
@@ -766,6 +849,7 @@ func inspectEnvHealth(ctx context.Context, memory *facade.Memory, harnessFilter 
 
 	noeStat := computeLayerDiff("noetic", localNoeticActive, 0, 0)
 	noeStat.StaleCount = localNoeticStaleCount
+	noeStat.SupersededCount = localNoeticSupersededCount
 
 	out.Layers["episodic"] = epiStat
 	out.Layers["background"] = bgStat
@@ -876,6 +960,10 @@ func inspectEnvHealth(ctx context.Context, memory *facade.Memory, harnessFilter 
 		noeStat.LocalVaultCount, noeStat.StaleCount)
 	nDetailEN := fmt.Sprintf("Active %d · Stale %d",
 		noeStat.LocalVaultCount, noeStat.StaleCount)
+	if noeStat.SupersededCount > 0 {
+		nDetailZH += fmt.Sprintf(" · 被替代 %d", noeStat.SupersededCount)
+		nDetailEN += fmt.Sprintf(" · Superseded %d", noeStat.SupersededCount)
+	}
 	totalScore += nScore
 	out.HealthChecks = append(out.HealthChecks, HealthCheckSubItem{
 		Key: "noetic_sync", LabelZH: "L3 Noetic 知性印迹健康度", LabelEN: "L3 Noetic Imprint Health",
@@ -1080,7 +1168,12 @@ func executeReconcileSyncWithScanLimit(ctx context.Context, memory *facade.Memor
 		rep.Warnings = append(rep.Warnings, "episodic index backfill covers only the scanned harness window; unavailable or unscanned historical sources are unknown")
 		changedSources := map[string]bool{}
 		for _, hid := range harnessIDs {
-			_, turns, _, complete := scanHarnessTurnsWithCoverageContext(ctx, home, hid, scope, scanCap)
+			_, turns, _, complete, _ := scanHarnessTurnsWithCoverageBoundContext(ctx, home, hid, scope, scanCap, since)
+			if excluded, known := countExcludedSubagentSources(ctx, home, hid); known {
+				rep.ExcludedSubagentSources += excluded
+			} else {
+				rep.Warnings = append(rep.Warnings, fmt.Sprintf("%s: subagent coverage inventory unreadable", hid))
+			}
 			if !complete {
 				rep.Warnings = append(rep.Warnings, fmt.Sprintf("%s: incomplete or unreadable episodic source coverage", hid))
 			}
@@ -1352,7 +1445,7 @@ func resolveActiveHarness(items []HarnessEnvItem, claims []activeHarnessClaim) (
 // harness's local conversation sessions (the count shown on the panel).
 func harnessSessionsScannable(harnessID string) bool {
 	switch harnessID {
-	case "zcode", "claude-code", "codex", "dsh", "codebuddy", "workbuddy", "opencode":
+	case "zcode", "claude-code", "codex", "dsh", "codebuddy", "workbuddy", "opencode", "doubao":
 		return true
 	}
 	return false
@@ -1361,44 +1454,72 @@ func harnessSessionsScannable(harnessID string) bool {
 // harnessTurnsScannable reports whether scanHarnessTurns can also read those
 // sessions' turn content. A harness whose transcript is compressed or uses an
 // unsupported event schema counts sessions but reports zero turns, and the panel
-// must label that as "not counted" rather than "no history".
+// must label that as "not counted" rather than "no history". OpenCode exposes a
+// session inventory only: its message/part schema has no turn reader in this
+// build, so it stays out of the turn list and is surfaced as a scope note.
 func harnessTurnsScannable(harnessID string) bool {
 	switch harnessID {
-	case "zcode", "claude-code", "codex", "dsh", "codebuddy", "workbuddy", "opencode":
+	case "zcode", "claude-code", "codex", "dsh", "codebuddy", "workbuddy", "doubao":
 		return true
 	}
 	return false
 }
 
-func harnessHasExcludedSubagentSources(ctx context.Context, home, harnessID string) bool {
-	if harnessID == "claude-code" {
+// countExcludedSubagentSources reports how many host-side subagent sources sit
+// outside automatic coverage. The public coverage contract states that subagent
+// conversations are not guaranteed, so this is a known collection-scope limit:
+// it is surfaced as a count, never as an unreadable-source failure. The boolean
+// is false when the inventory itself could not be read.
+func countExcludedSubagentSources(ctx context.Context, home, harnessID string) (int, bool) {
+	switch harnessID {
+	case "claude-code":
+		seen := map[string]bool{}
+		count := 0
 		for _, pattern := range []string{
 			filepath.Join(home, ".claude", "projects", "*", "*", "subagents", "*.jsonl"),
 			filepath.Join(home, ".claude", "projects", "*", "sessions", "*", "subagents", "*.jsonl"),
 		} {
 			matches, err := filepath.Glob(pattern)
-			if err != nil || len(matches) > 0 {
-				return true
+			if err != nil {
+				return 0, false
+			}
+			for _, path := range matches {
+				if seen[path] {
+					continue
+				}
+				info, statErr := os.Stat(path)
+				if statErr != nil {
+					if os.IsNotExist(statErr) {
+						continue
+					}
+					return 0, false
+				}
+				if info.IsDir() {
+					continue
+				}
+				seen[path] = true
+				count++
 			}
 		}
-	}
-	if harnessID == "zcode" {
+		return count, true
+	case "zcode":
 		path := filepath.Join(home, ".zcode", "cli", "db", "db.sqlite")
 		if _, err := os.Stat(path); err != nil {
-			return !os.IsNotExist(err)
+			return 0, os.IsNotExist(err)
 		}
 		db, err := sql.Open("sqlite", ids.SQLiteFileURI(path)+"?mode=ro&_pragma=busy_timeout(1500)")
 		if err != nil {
-			return true
+			return 0, false
 		}
 		defer db.Close()
 		var count int
 		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM session WHERE COALESCE(parent_id, '') != '' OR COALESCE(task_type, '') = 'subagent_child'`).Scan(&count); err != nil {
-			return true
+			return 0, false
 		}
-		return count > 0
+		return count, true
+	default:
+		return 0, true
 	}
-	return false
 }
 
 // scanHarnessTurns discovers local conversation sessions and extracts User+Assistant
@@ -1409,16 +1530,52 @@ func scanHarnessTurns(home, harnessID, scope string, maxTurns int) (int, []candi
 }
 
 func scanHarnessTurnsWithCoverage(home, harnessID, scope string, maxTurns int) (int, []candidateEpisodicTurn, int64, bool) {
-	return scanHarnessTurnsWithCoverageContext(context.Background(), home, harnessID, scope, maxTurns)
+	sessions, turns, lastActiveAt, complete, _ := scanHarnessTurnsWithCoverageContext(context.Background(), home, harnessID, scope, maxTurns)
+	return sessions, turns, lastActiveAt, complete
 }
 
-func scanHarnessTurnsWithCoverageContext(ctx context.Context, home, harnessID, scope string, maxTurns int) (sessionsCount int, turns []candidateEpisodicTurn, lastActiveAt int64, complete bool) {
+// episodicStampMatters reports whether a source stamp change invalidates the
+// completeness verdict. SQLite-backed zcode sources are read through one
+// read-only transaction per session: concurrent appends land after the snapshot
+// and cannot corrupt the turns already read, so a live database/WAL write is not
+// an incomplete scan. Transcript files keep the strict stamp check.
+func episodicStampMatters(source episodicScanSource, before, after string) bool {
+	return before != after && source.Kind != "zcode"
+}
+
+// episodicSourceActivity returns the source's last-write time in unix seconds.
+// SQLite-backed sources carry the per-session time_updated (the database file
+// mtime is shared by every session); transcript sources fall back to the file
+// mtime. Used only for scan ordering, newest first.
+func episodicSourceActivity(source episodicScanSource) int64 {
+	if source.LastActivity > 0 {
+		return source.LastActivity
+	}
+	if info, err := os.Stat(source.Path); err == nil {
+		return info.ModTime().Unix()
+	}
+	return 0
+}
+
+// scanHarnessTurnsWithCoverageContext scans every source without an ingest bound.
+func scanHarnessTurnsWithCoverageContext(ctx context.Context, home, harnessID, scope string, maxTurns int) (sessionsCount int, turns []candidateEpisodicTurn, lastActiveAt int64, complete bool, outOfScope int) {
+	return scanHarnessTurnsWithCoverageBoundContext(ctx, home, harnessID, scope, maxTurns, 0)
+}
+
+// scanHarnessTurnsWithCoverageBoundContext is the coverage scan with the ingest
+// lower bound applied to source discovery: a source whose last activity predates
+// sync.since cannot contribute an importable turn, so reading it would only spend
+// the page budget and could mark the scanned window incomplete for history the
+// vault is configured never to store. sessionsCount still reports the full
+// inventory; complete describes the collection scope, not the host's whole past.
+func scanHarnessTurnsWithCoverageBoundContext(ctx context.Context, home, harnessID, scope string, maxTurns int, since int64) (sessionsCount int, turns []candidateEpisodicTurn, lastActiveAt int64, complete bool, outOfScope int) {
 	complete = true
 	if maxTurns <= 0 {
 		maxTurns = 100
 	}
 	if harnessID == "opencode" {
-		return scanOpenCodeSessions(ctx, home)
+		s, t, l, c := scanOpenCodeSessions(ctx, home)
+		return s, t, l, c, 0
 	}
 	if !harnessTurnsScannable(harnessID) {
 		seen := map[string]bool{}
@@ -1436,27 +1593,32 @@ func scanHarnessTurnsWithCoverageContext(ctx context.Context, home, harnessID, s
 				}
 			}
 		}
-		return sessionsCount, nil, lastActiveAt, sessionsCount == 0
+		return sessionsCount, nil, lastActiveAt, sessionsCount == 0, 0
 	}
 	sources, err := discoverEpisodicScanSources(ctx, home, harnessID)
 	if err != nil {
 		complete = false
 	}
-	if harnessHasExcludedSubagentSources(ctx, home, harnessID) {
-		complete = false
-	}
 	sessionsCount = len(sources)
+	// Last activity is host telemetry, not collection scope: compute it before
+	// the ingest bound filters the read set, so an old host still shows when it
+	// last wrote instead of collapsing to "-".
+	for _, source := range sources {
+		if info, err := os.Stat(source.Path); err == nil && info.ModTime().Unix() > lastActiveAt {
+			lastActiveAt = info.ModTime().Unix()
+		}
+	}
+	if since > 0 {
+		// Scan scope follows the configured collection window. The inventory
+		// count above stays whole-host; only the read set is bounded.
+		sources = filterEpisodicScanSourcesSince(sources, since)
+	}
 	sort.SliceStable(sources, func(i, j int) bool {
-		left, _ := os.Stat(sources[i].Path)
-		right, _ := os.Stat(sources[j].Path)
-		return left != nil && (right == nil || left.ModTime().After(right.ModTime()))
+		return episodicSourceActivity(sources[i]) > episodicSourceActivity(sources[j])
 	})
 	for _, source := range sources {
 		if ctx.Err() != nil {
-			return sessionsCount, turns, lastActiveAt, false
-		}
-		if info, err := os.Stat(source.Path); err == nil && info.ModTime().Unix() > lastActiveAt {
-			lastActiveAt = info.ModTime().Unix()
+			return sessionsCount, turns, lastActiveAt, false, outOfScope
 		}
 		if len(turns) >= maxTurns {
 			complete = false
@@ -1467,9 +1629,16 @@ func scanHarnessTurnsWithCoverageContext(ctx context.Context, home, harnessID, s
 		wrapped := false
 		before, stampErr := episodicScanSourceStamp(source)
 		_, scanErr := streamEpisodicScanSource(ctx, source, scope, func(_ int, turn candidateEpisodicTurn) error {
-			if !turn.Completed {
-				complete = false
+			// Turns older than the configured ingest bound are outside the
+			// collection scope: count them for diagnostics, but never let them
+			// consume the page budget or mark the in-bound window incomplete.
+			if episodicOccurredBefore(turn.OccurredAt, since) {
+				outOfScope++
+				return nil
 			}
+			// Turns without confirmed completion (open tail / aborted run) are
+			// not importable by contract. Their absence is reported per harness
+			// as IncompleteTurnsCount; it does not make the source unreadable.
 			if len(sourceTurns) < maxTurns {
 				sourceTurns = append(sourceTurns, turn)
 			} else {
@@ -1487,7 +1656,7 @@ func scanHarnessTurnsWithCoverageContext(ctx context.Context, home, harnessID, s
 			sourceTurns = ordered
 		}
 		after, afterErr := episodicScanSourceStamp(source)
-		if stampErr != nil || scanErr != nil || afterErr != nil || before != after {
+		if stampErr != nil || scanErr != nil || afterErr != nil || episodicStampMatters(source, before, after) {
 			complete = false
 		}
 		if remaining := maxTurns - len(turns); len(sourceTurns) > remaining {
@@ -1496,7 +1665,7 @@ func scanHarnessTurnsWithCoverageContext(ctx context.Context, home, harnessID, s
 		}
 		turns = append(turns, sourceTurns...)
 	}
-	return sessionsCount, turns, lastActiveAt, complete
+	return sessionsCount, turns, lastActiveAt, complete, outOfScope
 }
 
 // scanOpenCodeSessions reads OpenCode's SQLite session store for inventory and

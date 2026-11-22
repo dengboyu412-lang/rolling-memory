@@ -260,3 +260,29 @@ func TestBootstrapSQLitePreservesCustomizedMenuAndPermissions(t *testing.T) {
 		t.Fatalf("重复启动改变了定制菜单或权限节点\nbefore: %+v\nafter: %+v", before, after)
 	}
 }
+
+// TestBootstrapSQLiteSeedsRMConsoleRouteNodes 锁定控制台新增交互路由的权限节点。
+// 路由挂载（rmconsole）与权限树（bootstrap）分处两个包，新增路由若漏登记节点，
+// 超管之外的角色会在「重新检测 / 导出 / 维护」等交互上收到 403。
+func TestBootstrapSQLiteSeedsRMConsoleRouteNodes(t *testing.T) {
+	db := openBootstrapTestDB(t)
+	if err := BootstrapSQLite(db); err != nil {
+		t.Fatalf("BootstrapSQLite: %v", err)
+	}
+	for _, name := range []string{
+		"plugin/rolling-memory/env/health/refresh",
+		"plugin/rolling-memory/eval/export",
+		"plugin/rolling-memory/eval/atm/protocol",
+		"plugin/rolling-memory/maintenance/prune",
+		"plugin/rolling-memory/maintenance/space",
+		"plugin/rolling-memory/system/update/source",
+	} {
+		var count int64
+		if err := db.Raw(`SELECT COUNT(*) FROM admin_rules WHERE name = ? AND type = 'node' AND status = 1`, name).Scan(&count).Error; err != nil {
+			t.Fatalf("读取权限节点 %s: %v", name, err)
+		}
+		if count != 1 {
+			t.Fatalf("权限节点 %s 计数 = %d，期望 1", name, count)
+		}
+	}
+}

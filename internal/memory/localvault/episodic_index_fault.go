@@ -73,7 +73,12 @@ func (v *Vault) computeEpisodicIndexFaultDiagnostics(key []byte) (EpisodicIndexF
 	hasFingerprint := false
 	var snapValidIDs map[string]struct{}
 	if v.slotCacheMu != nil && v.snapRef != nil {
-		if v.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(rowid), 0), COALESCE(MAX(rowid), 0), COALESCE(SUM(LENGTH(raw_text)), 0) FROM rm_units`).Scan(&docCnt, &docRowSum, &docMaxRowID, &docTextLen) == nil &&
+		if v.db.QueryRow(`SELECT
+				(SELECT COUNT(*) FROM rm_units),
+				(SELECT COALESCE(SUM(rowid), 0) FROM rm_docs),
+				(SELECT COALESCE(MAX(rowid), 0) FROM rm_docs),
+				(SELECT COALESCE(SUM(LENGTH(raw_text)), 0) FROM rm_units)`).
+			Scan(&docCnt, &docRowSum, &docMaxRowID, &docTextLen) == nil &&
 			v.db.QueryRow(`SELECT episodic_rev FROM rm_revision WHERE id = 1`).Scan(&episodicRevision) == nil &&
 			v.db.QueryRow(`SELECT COUNT(*) FROM rm_episodic_index`).Scan(&idxCnt) == nil {
 			hasFingerprint = true

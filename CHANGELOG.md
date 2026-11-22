@@ -7,7 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes yet._
+### Added
+
+- Doubao conversation exports saved under `~/Doubao/exports` (or `~/.doubao/exports`) can now be imported alongside the other supported harness transcripts.
+
+### Changed
+
+- The admin console's sync status distinguishes history outside `sync.since`, incomplete turns, and excluded subagent sources from pending work, and lists stale and superseded knowledge entries separately.
+- Episodic scans reuse the longest already-scanned ZCode turn prefix, so repeated lookups of one long session no longer rescan it from the start.
+- The memory graph resolves word families from the published snapshot and caches each visible unit's hydration, so switching capacity, layer, or keyword filters no longer repeats the full projection.
+
+### Fixed
+
+- A recall call retries once when the local daemon retires between the health probe and the request, instead of returning a transient EOF.
+- Harness counts and their per-host cache now honor the `sync.since` ingest bound instead of reporting out-of-scope history as pending work.
+- Vault fingerprints and the secret-key fast path read the canonical document rows, and a vault upgraded from an older schema keeps its knowledge-trace columns.
+- The admin console reads canonical rows and rule names, seeds the newer interactive route permissions, and only reports a memory-limit restart when the value actually changed.
 
 ## [0.0.11] - 2026-11-22
 

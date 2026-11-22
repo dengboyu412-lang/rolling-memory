@@ -2273,3 +2273,25 @@ func TestUnixDaemonDocumentsResolveBackgroundChunkBody(t *testing.T) {
 		t.Fatalf("missing unit must answer with a per-item error: %+v", out)
 	}
 }
+
+// TestRetryableDaemonTransport pins which failures earn the single recall retry:
+// a closed listener between the health probe and the request is transient, while
+// an engine or protocol error is a real answer that must not be replayed.
+func TestRetryableDaemonTransport(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"eof", io.EOF, true},
+		{"unexpected eof", fmt.Errorf("daemon recall outcome unknown: %w", io.ErrUnexpectedEOF), true},
+		{"reset", fmt.Errorf("write: %w", syscall.ECONNRESET), true},
+		{"broken pipe", syscall.EPIPE, true},
+		{"engine error", &EngineRecallError{Msg: "bad query"}, false},
+		{"protocol error", errors.New("invalid daemon response stream"), false},
+	} {
+		if got := retryableDaemonTransport(tc.err); got != tc.want {
+			t.Fatalf("%s: retryable=%v want=%v", tc.name, got, tc.want)
+		}
+	}
+}

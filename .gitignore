@@ -37,3 +37,10 @@ __pycache__/
 /evaldata/*/processed_memory/
 /evaldata/*/atm-bench/
 /evaldata/*/UPSTREAM-PROVENANCE.json
+
+# Local build artifacts and ephemeral evaluation run state (regenerable,
+# multi-GB in aggregate): compiled test binaries, perf probes built in place,
+# and per-arm eval vaults used only for resume.
+/*.test
+/perfprobe
+/dev/evidence/**/state/

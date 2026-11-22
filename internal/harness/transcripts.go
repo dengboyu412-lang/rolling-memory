@@ -79,6 +79,14 @@ func TranscriptGlobs(home, harnessID string) []string {
 			filepath.Join(home, ".workbuddy", "projects", "*", "*.jsonl"),
 			filepath.Join(home, ".workbuddy", "projects", "*", "sessions", "*.jsonl"),
 		}
+	case "doubao":
+		// Doubao keeps live chat history behind its authenticated service and
+		// encrypted SDK store; the supported local path is a user-assisted JSONL
+		// export (one conversation per file) placed in the app workspace.
+		return []string{
+			filepath.Join(home, "Doubao", "exports", "*.jsonl"),
+			filepath.Join(home, ".doubao", "exports", "*.jsonl"),
+		}
 	}
 	return nil
 }

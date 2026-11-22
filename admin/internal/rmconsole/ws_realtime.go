@@ -86,18 +86,21 @@ func getRMWSServer() *wsengine.Server {
 
 func wsRoomPermissionRules(kind streamKind) ([]string, string) {
 	switch kind {
+	// 规则名必须与 admin_rules.name 逐字同形（不带 /admin 路由前缀）：
+	// AdminPermission 会先 BuildCheckPath 去掉前缀再比对，WebSocket 房间
+	// 没有这条 HTTP 路径，硬编码带前缀会让所有非超管角色被拒。
 	case streamKindStatus:
-		return []string{"admin/plugin/rolling-memory/status", "admin/plugin/rolling-memory/widget"}, "OR"
+		return []string{"plugin/rolling-memory/status", "plugin/rolling-memory/widget"}, "OR"
 	case streamKindDashboard:
-		return []string{"admin/plugin/rolling-memory/dashboard"}, "AND"
+		return []string{"plugin/rolling-memory/dashboard"}, "AND"
 	case streamKindEnvHealth:
-		return []string{"admin/plugin/rolling-memory/env/health"}, "AND"
+		return []string{"plugin/rolling-memory/env/health"}, "AND"
 	case streamKindTerminal:
-		return []string{"admin/plugin/rolling-memory/terminal"}, "AND"
+		return []string{"plugin/rolling-memory/terminal"}, "AND"
 	case streamKindROI:
-		return []string{"admin/plugin/rolling-memory/roi/facts", "admin/plugin/rolling-memory/efficacy"}, "OR"
+		return []string{"plugin/rolling-memory/roi/facts", "plugin/rolling-memory/efficacy"}, "OR"
 	case streamKindEval:
-		return []string{"admin/plugin/rolling-memory/eval/overview", "admin/plugin/rolling-memory/eval/run"}, "OR"
+		return []string{"plugin/rolling-memory/eval/overview", "plugin/rolling-memory/eval/run"}, "OR"
 	case streamKindSystem:
 		// 名称与 admin_rules.name 同形（权限检查直接按规则名匹配）。
 		return []string{"plugin/rolling-memory/system/read", "plugin/rolling-memory/system/daemon"}, "OR"

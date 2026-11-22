@@ -56,7 +56,7 @@ type tableWhereGroup struct {
 type ThreeLayerRow struct {
 	ID              string   `json:"id"`
 	Layer           string   `json:"layer"`  // background | episodic | noetic
-	Status          string   `json:"status"` // active | stale
+	Status          string   `json:"status"` // active | stale | superseded
 	Title           string   `json:"title"`
 	Content         string   `json:"content"`
 	AnswerText      string   `json:"answer_text,omitempty"`

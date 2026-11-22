@@ -68,7 +68,7 @@ func TestHarnessTranscriptPatternsCoverImportableHosts(t *testing.T) {
 		t.Fatal("transcript patterns are empty")
 	}
 	joined := strings.Join(patterns, "\n")
-	for _, want := range []string{".claude", ".codex", ".zcode", "dsh-home"} {
+	for _, want := range []string{".claude", ".codex", ".zcode", "dsh-home", "Doubao/exports"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("importable host missing from the change detector: %s", want)
 		}

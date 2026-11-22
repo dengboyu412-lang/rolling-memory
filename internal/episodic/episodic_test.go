@@ -370,3 +370,60 @@ func TestJSONLCompletionEvidence(t *testing.T) {
 		})
 	}
 }
+
+// TestZCodeTurnCacheServesEarlyPrefixAndInvalidatesOnAppend pins the resolver
+// cache contract: an early-stopped prefix serves later `#0`-style lookups, a
+// partial prefix never answers a whole-turn request, and a new session message
+// invalidates the identity so a stale prefix cannot outlive its transcript.
+func TestZCodeTurnCacheServesEarlyPrefixAndInvalidatesOnAppend(t *testing.T) {
+	db := openZCodeFixture(t)
+	hit0 := zcodeTurnCacheHitCount()
+
+	first, firstComplete, err := ZCodeTurnSegmentsUpTo(db, "s1", "m1", 1)
+	if err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	if len(first) != 1 || firstComplete {
+		t.Fatalf("first prefix = %d complete=%v, want 1/false", len(first), firstComplete)
+	}
+	if got := zcodeTurnCacheHitCount(); got != hit0 {
+		t.Fatalf("first call hit the cache: hits=%d want=%d", got, hit0)
+	}
+
+	second, secondComplete, err := ZCodeTurnSegmentsUpTo(db, "s1", "m1", 1)
+	if err != nil || !reflect.DeepEqual(second, first) || secondComplete != firstComplete {
+		t.Fatalf("second = %+v/%v err=%v, want cache hit of %+v/%v", second, secondComplete, err, first, firstComplete)
+	}
+	if got := zcodeTurnCacheHitCount(); got != hit0+1 {
+		t.Fatalf("second call missed the cache: hits=%d want=%d", got, hit0+1)
+	}
+
+	full, fullComplete, err := ZCodeTurnSegmentsUpTo(db, "s1", "m1", 0)
+	if err != nil {
+		t.Fatalf("full: %v", err)
+	}
+	if !fullComplete || len(full) <= len(first) {
+		t.Fatalf("full = %d complete=%v, want more than prefix and complete", len(full), fullComplete)
+	}
+	if got := zcodeTurnCacheHitCount(); got != hit0+1 {
+		t.Fatalf("partial prefix answered a full-turn request: hits=%d want=%d", got, hit0+1)
+	}
+
+	fullAgain, fullAgainComplete, err := ZCodeTurnSegmentsUpTo(db, "s1", "m1", 1)
+	if err != nil || !fullAgainComplete || len(fullAgain) != len(full) {
+		t.Fatalf("complete entry did not serve the prefix shape: %d/%v err=%v", len(fullAgain), fullAgainComplete, err)
+	}
+	if got := zcodeTurnCacheHitCount(); got != hit0+2 {
+		t.Fatalf("complete entry missed the cache: hits=%d want=%d", got, hit0+2)
+	}
+
+	if _, err := db.Exec(`INSERT INTO message(id, session_id, sequence, time_created, data) VALUES ('m5', 's1', 10, 1793102440, '{"role":"assistant"}')`); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if _, _, err := ZCodeTurnSegmentsUpTo(db, "s1", "m1", 1); err != nil {
+		t.Fatalf("after append: %v", err)
+	}
+	if got := zcodeTurnCacheHitCount(); got != hit0+2 {
+		t.Fatalf("stale prefix survived a new message: hits=%d want=%d", got, hit0+2)
+	}
+}

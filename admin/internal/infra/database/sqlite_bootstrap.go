@@ -431,6 +431,16 @@ func bootstrapSQLite(db *gorm.DB) error {
 			(166, 101, 'node', '执行在线安全升级（SHA-256 校验）', 'plugin/rolling-memory/system/update/apply', '', '', '', '', '', 1, '', '', 0, 1, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
 			(167, 101, 'node', '读取在线更新状态缓存', 'plugin/rolling-memory/system/update/status', '', '', '', '', '', 1, '', '', 0, 1, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
 			(168, 101, 'node', '切换更新通道（稳定版 / 测试版 / 开发版）', 'plugin/rolling-memory/system/update/channel', '', '', '', '', '', 1, '', '', 0, 1, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`).Error
+	// 新增路由必须同步登记权限节点，否则非超管角色会在这些交互上收到 403：
+	// 重新检测（env/health/refresh）、评测导出、ATM 协议面板、清理/空间维护、
+	// 更新源切换。节点挂在对应页面的父节点下，沿用既有菜单权限树。
+	_ = db.Exec(`INSERT OR IGNORE INTO "admin_rules" ("id", "pid", "type", "title", "name", "path", "icon", "open_type", "url", "component", "keepalive", "extend", "remark", "weigh", "status", "plugin", "updated_at", "created_at") VALUES
+			(355, 101, 'node', '强制重新检测环境与记忆健康', 'plugin/rolling-memory/env/health/refresh', '', '', '', '', '', 1, '', '', 0, 1, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+			(356, 105, 'node', '导出评测复现报告', 'plugin/rolling-memory/eval/export', '', '', '', '', '', 1, '', '', 0, 1, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+			(357, 128, 'node', '读取 ATM-Bench 官方协议对拍状态', 'plugin/rolling-memory/eval/atm/protocol', '', '', '', '', '', 1, '', '', 0, 1, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+			(358, 101, 'node', '预演或执行记忆清理与自愈', 'plugin/rolling-memory/maintenance/prune', '', '', '', '', '', 1, '', '', 0, 1, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+			(359, 101, 'node', '扫描或执行磁盘空间维护', 'plugin/rolling-memory/maintenance/space', '', '', '', '', '', 1, '', '', 0, 1, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+			(360, 101, 'node', '切换在线更新源', 'plugin/rolling-memory/system/update/source', '', '', '', '', '', 1, '', '', 0, 1, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`).Error
 	_ = db.Exec(`UPDATE "admin_rules" SET "weigh" = 970 WHERE "name" = 'auth' AND "type" = 'dir' AND "weigh" = 998`).Error
 	_ = db.Exec(`UPDATE "admin_rules" SET "weigh" = 969 WHERE "name" = 'routine' AND "type" = 'dir' AND "weigh" = 997`).Error
 	// 「常规管理」频道改名为「系统管理」：只迁移仍是出厂标题的行，用户自定义标题保持不动。

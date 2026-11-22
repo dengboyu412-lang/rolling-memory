@@ -28,6 +28,10 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// localVaultCarrier 是现役记忆载体标识（唯一运行形态 = 本地明文金库）。
+// 历史协议字符串不再出现在控制台交付面。
+const localVaultCarrier = "local_plain"
+
 // MemoriesQueryRequest 全量记忆列表筛选、排序与分页请求。
 //
 // 契约只声明薄客户端本地金库（rm_units / rm_noetic）真实具备的维度：
@@ -660,7 +664,7 @@ func queryFacets(dbPath, scope string) MemoriesSummary {
 			summary.TopPredicates = append(summary.TopPredicates, FacetCount{Value: item.name, Count: item.count})
 		}
 	}
-	summary.Carriers = []FacetCount{{Value: "open-memory-v1", Count: totalInScope}}
+	summary.Carriers = []FacetCount{{Value: localVaultCarrier, Count: totalInScope}}
 	facetsCacheMu.Lock()
 	facetsCache[cacheKey] = struct {
 		sig     string
@@ -748,7 +752,7 @@ func queryMemoriesFromDB(dbPath string, req MemoriesQueryRequest) (MemoriesQuery
 				nWhere = "COALESCE(NULLIF(status, ''), 'active') = 'active'"
 				fastTotal += tmp.NoeticActiveCount
 			} else if statusNorm == "stale" {
-				nWhere = "COALESCE(NULLIF(status, ''), 'active') = 'stale'"
+				nWhere = "COALESCE(NULLIF(status, ''), 'active') <> 'active'"
 				fastTotal += tmp.NoeticStaleCount
 			} else {
 				fastTotal += tmp.NoeticActiveCount + tmp.NoeticStaleCount
@@ -1073,7 +1077,7 @@ func memoryItemFromSQL(r map[string]any, scope string) MemoryItem {
 			Warrant:         noeticLayer,
 			Audience:        "shared",
 			TemporalClass:   noeticLayer,
-			Carrier:         "open-memory-v1",
+			Carrier:         localVaultCarrier,
 			Locus:           asString(r["cited_json"]),
 			TSource:         ts,
 			CreatedAt:       ts,
@@ -1104,7 +1108,7 @@ func memoryItemFromSQL(r map[string]any, scope string) MemoryItem {
 		Warrant:         layer,
 		Audience:        "shared",
 		TemporalClass:   "episodic",
-		Carrier:         "open-memory-v1",
+		Carrier:         localVaultCarrier,
 		Locus:           addr,
 		Workspace:       cellKey,
 		TSource:         ts,
@@ -1166,7 +1170,7 @@ func queryMemoryDetailFromDB(dbPath, id string) (MemoryDetailResponse, error) {
 			Status:          "active",
 			Warrant:         layer,
 			Audience:        "shared",
-			Carrier:         "open-memory-v1",
+			Carrier:         localVaultCarrier,
 			Locus:           addr,
 			Workspace:       cellKey,
 			TSource:         ts,
@@ -1212,7 +1216,7 @@ func queryMemoryDetailFromDB(dbPath, id string) (MemoryDetailResponse, error) {
 			Status:          asString(r["status"]),
 			Warrant:         "noetic",
 			Audience:        "shared",
-			Carrier:         "open-memory-v1",
+			Carrier:         localVaultCarrier,
 			Locus:           asString(r["cited_unit_ids_json"]),
 			TSource:         ts,
 			CreatedAt:       ts,
@@ -1273,7 +1277,7 @@ func queryMemoryDetailFromDB(dbPath, id string) (MemoryDetailResponse, error) {
 			Status:          "active",
 			Warrant:         "background",
 			Audience:        "shared",
-			Carrier:         "open-memory-v1",
+			Carrier:         localVaultCarrier,
 			Locus:           addr,
 			Workspace:       cellKey,
 			TSource:         ts,
@@ -1339,7 +1343,7 @@ func lookupAssertionSpacetimeMeta(dbPath string, ids []string) (snippets, incarn
 		id := asString(r["id"])
 		snippets[id] = clipRunes(hydrateVaultTextForDisplay(dbPath, id, asString(r["text"])), 120)
 		loci[id] = asString(r["locus"])
-		carriers[id] = "open-memory-v1"
+		carriers[id] = localVaultCarrier
 	}
 	return
 }
@@ -2519,7 +2523,7 @@ func computeDashboardData(home, reqScope string) DashboardResponse {
 					COALESCE(SUM(CASE WHEN COALESCE(layer, 'episodic') != 'background' AND substr(ltrim(raw_text), 1, 5) = '@ref:' THEN 1 ELSE 0 END), 0) AS ptr_cnt,
 					COALESCE(SUM(CASE WHEN COALESCE(address_uri, '') != '' OR substr(ltrim(raw_text), 1, 5) = '@ref:' THEN 1 ELSE 0 END), 0) AS doc_addr_cnt,
 					(SELECT COALESCE(SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END), 0) FROM rm_noetic) AS noetic_cnt,
-					(SELECT COALESCE(SUM(CASE WHEN status != 'active' THEN 1 ELSE 0 END), 0) FROM rm_noetic) AS noetic_stale_cnt,
+					(SELECT COALESCE(SUM(CASE WHEN status = 'stale' THEN 1 ELSE 0 END), 0) FROM rm_noetic) AS noetic_stale_cnt,
 					(SELECT COALESCE(SUM(CASE WHEN status = 'active' AND (COALESCE(cited_unit_ids_json, '[]') != '[]' OR COALESCE(address_uri, '') != '') THEN 1 ELSE 0 END), 0) FROM rm_noetic) AS noetic_addr_cnt
 				FROM rm_units;`); err == nil && len(cntRows) > 0 {
 			bgRawCnt := asInt(cntRows[0]["bg_cnt"])
@@ -3795,13 +3799,14 @@ var (
 	graphDomainTTL = 10 * time.Minute
 )
 
-// graphVaultFingerprint 计算图谱装配所依赖的金库状态指纹（三表：行数 / rowid 上界 / occurred_at 上界 / 正文长度和）。
-// 指纹一致 ⇒ 装配输入一致；任何追加、删除、状态迁移与正文长度变化都会改变指纹。查询失败返回空串（调用方按未命中处理）。
+// graphVaultFingerprint 计算图谱装配所依赖的金库状态指纹（三表：行数 / 写入序上界 / occurred_at 上界 / 正文长度和）。
+// rm_units 是 rm_docs × rm_unit_meta 的只读视图，视图本身没有 rowid；写入序改用
+// 规范表 rm_docs.rowid。指纹一致 ⇒ 装配输入一致；查询失败返回空串（调用方按未命中处理）。
 func graphVaultFingerprint(dbPath string) string {
 	rows, err := sqliteQueryJSON(dbPath, `
 		SELECT
 			(SELECT COUNT(*) FROM rm_units) || ':' ||
-			(SELECT IFNULL(MAX(rowid), 0) FROM rm_units) || ':' ||
+			(SELECT IFNULL(MAX(rowid), 0) FROM rm_docs) || ':' ||
 			(SELECT IFNULL(MAX(occurred_at), 0) FROM rm_units) || ':' ||
 			(SELECT IFNULL(SUM(LENGTH(COALESCE(raw_text, ''))), 0) FROM rm_units) || ':' ||
 			(SELECT IFNULL(SUM(LENGTH(COALESCE(sentences_json, ''))), 0) FROM rm_units) || '|' ||

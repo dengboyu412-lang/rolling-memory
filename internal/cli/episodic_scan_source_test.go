@@ -1167,6 +1167,67 @@ func TestEpisodicSourceScanZCodeSessions(t *testing.T) {
 	}
 }
 
+// TestEpisodicStampZCodeConcurrentWriteIsNotIncomplete locks the live-host
+// completeness rule: a zcode scan reads each session from one transaction
+// snapshot, so an append that lands mid-scan must not turn the whole pass into
+// "incomplete coverage". Transcript files keep the strict stamp check.
+func TestEpisodicStampZCodeConcurrentWriteIsNotIncomplete(t *testing.T) {
+	if episodicStampMatters(episodicScanSource{Kind: "zcode"}, "1:2", "1:3") {
+		t.Fatal("zcode concurrent append marked the scan incomplete")
+	}
+	if !episodicStampMatters(episodicScanSource{Kind: "jsonl"}, "1:2", "1:3") {
+		t.Fatal("jsonl stamp change was ignored")
+	}
+	if episodicStampMatters(episodicScanSource{Kind: "jsonl"}, "1:2", "1:2") {
+		t.Fatal("unchanged jsonl stamp marked the scan incomplete")
+	}
+}
+
+// TestNoeticHealthSeparatesSupersededFromStale locks the L3 health boundary:
+// superseding is the normal trace-dedupe lifecycle (the newer trace carries the
+// cue), so it must not be reported as stale or reduce the Noetic health score.
+func TestNoeticHealthSeparatesSupersededFromStale(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	memory, err := facade.New(&config.Config{DB: filepath.Join(home, "memory.db"), Scope: "mem:noetic-health", Mode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer memory.Close()
+	if _, err := memory.LocalVault(); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range []struct{ id, status string }{
+		{"NT-ACTIVE", "active"},
+		{"NT-SUPERSEDED", "superseded"},
+	} {
+		if _, err := memory.Store.DB().Exec(
+			`INSERT INTO rm_noetic(noetic_id, status, query_text, answer_text) VALUES (?, ?, ?, ?)`,
+			row.id, row.status, row.id, row.id,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	status, err := inspectEnvHealthAndSync(context.Background(), memory, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	noe := status.Layers["noetic"]
+	if noe.StaleCount != 0 || noe.SupersededCount != 1 {
+		t.Fatalf("noetic lifecycle counts = stale %d superseded %d", noe.StaleCount, noe.SupersededCount)
+	}
+	for _, check := range status.HealthChecks {
+		if check.Key != "noetic_sync" {
+			continue
+		}
+		if check.Status != "healthy" || check.Score != 15 || !strings.Contains(check.DetailEN, "Superseded 1") {
+			t.Fatalf("noetic health = %+v", check)
+		}
+		return
+	}
+	t.Fatal("noetic health check missing")
+}
+
 // TestResolveJSONLTranscriptLocusCanonicalIdentity 锁定入库面的工作区身份口径：
 // 会话 cwd 解析为仓库根 basename（子目录归仓库），非仓库目录得到已解析的空串
 // （而不是目录名），只有读不到 cwd 时才报告未解析（调用方保留存量 locus）。

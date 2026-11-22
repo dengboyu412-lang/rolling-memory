@@ -98,19 +98,21 @@ func collectArtifactStats(dbPath, scope string) ArtifactStats {
 // bumps are reflected immediately on /dashboard, /status, /widget, and /terminal even before
 // the rolling-admin binary is recompiled.
 func liveSoftwareVersion() string {
-	if v := strings.TrimSpace(Version); v != "" && !strings.ContainsAny(v, " \t\r\n") {
-		return v
+	candidates := []string{"VERSION", "../VERSION"}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		candidates = append(candidates,
+			filepath.Join(home, "Rolling-Memory", "VERSION"),
+			filepath.Join(home, ".local", "share", "rolling-memory", "VERSION"),
+			filepath.Join(home, ".local", "share", "rolling-memory", "admin", "VERSION"),
+		)
 	}
-	if raw, err := os.ReadFile("../VERSION"); err == nil {
+	for _, path := range candidates {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
 		if v := strings.TrimSpace(string(raw)); v != "" && !strings.ContainsAny(v, " \t\r\n") {
 			return v
-		}
-	}
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		if raw, err := os.ReadFile(filepath.Join(home, "Rolling-Memory", "VERSION")); err == nil {
-			if v := strings.TrimSpace(string(raw)); v != "" && !strings.ContainsAny(v, " \t\r\n") {
-				return v
-			}
 		}
 	}
 	return Version
@@ -420,7 +422,7 @@ func toggleHandler(c *gin.Context) {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"code": http.StatusUnauthorized, "message": "请先登录"})
 			return
 		}
-		allowed, pErr := checkRMConsolePermission(c.Request.Context(), admin.ID, []string{"admin/plugin/rolling-memory/layers/delete"}, "AND")
+		allowed, pErr := checkRMConsolePermission(c.Request.Context(), admin.ID, []string{"plugin/rolling-memory/layers/delete"}, "AND")
 		if pErr != nil {
 			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"code": http.StatusServiceUnavailable, "message": "权限服务暂不可用"})
 			return

@@ -2037,12 +2037,49 @@ func (e *evalVerifyFailure) Error() string { return e.message }
 
 func (e *evalVerifyFailure) Unwrap() error { return e.err }
 
+// decodeEvalCLIJSON 解析评测子进程的 JSON 载荷。评测命令会在 stdout 先写
+// `[eval] arm=...` 之类的诊断行，再输出最终 JSON；直接对整段输出调用
+// json.Unmarshal 会把失败信封（尤其是稳定 error_code）一起丢掉，导致
+// manifest_corpus_mismatch 无法进入自愈重灌路径。这里允许前缀行与多行 JSON。
+func decodeEvalCLIJSON(out []byte, v any) error {
+	trimmed := bytes.TrimSpace(out)
+	if len(trimmed) == 0 {
+		return errors.New("CLI output is empty")
+	}
+	if err := json.Unmarshal(trimmed, v); err == nil {
+		return nil
+	}
+	// 常见形态：诊断行在前，单行 JSON 在最后一行。
+	lines := bytes.Split(trimmed, []byte("\n"))
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := bytes.TrimSpace(lines[i])
+		if len(line) == 0 || line[0] != '{' {
+			continue
+		}
+		if err := json.Unmarshal(line, v); err == nil {
+			return nil
+		}
+	}
+	// 兼容带前缀的 pretty-print JSON：从每个可能的对象起点尝试到输出末尾。
+	for idx := bytes.IndexByte(trimmed, '{'); idx >= 0; {
+		if err := json.Unmarshal(trimmed[idx:], v); err == nil {
+			return nil
+		}
+		next := bytes.IndexByte(trimmed[idx+1:], '{')
+		if next < 0 {
+			break
+		}
+		idx += next + 1
+	}
+	return fmt.Errorf("CLI output is not a JSON object: %s", clipRunes(string(trimmed), 240))
+}
+
 // parseEvalCLIVerifyFailure 解开 rmem 的 JSON 失败信封 {ok:false, error, error_code}；
 // 非 JSON 输出（进程被杀、stderr 独有）退化为 exec 错误 + 原始输出明细，绝不丢诊断信息。
 func parseEvalCLIVerifyFailure(out []byte, execErr error) *evalVerifyFailure {
 	failure := &evalVerifyFailure{err: execErr}
 	var envelope map[string]any
-	if json.Unmarshal(bytes.TrimSpace(out), &envelope) == nil {
+	if decodeEvalCLIJSON(out, &envelope) == nil {
 		failure.code = strings.TrimSpace(asString(envelope["error_code"]))
 		failure.message = strings.TrimSpace(asString(envelope["error"]))
 	}
@@ -2085,7 +2122,7 @@ func probeLocalEvalStore(ctx context.Context, bin, storePath, suite, query strin
 		return readiness, failure
 	}
 	var verification map[string]any
-	if err := json.Unmarshal(out, &verification); err != nil {
+	if err := decodeEvalCLIJSON(out, &verification); err != nil {
 		readiness.Error = err.Error()
 		cacheEvalReadiness(readiness)
 		return readiness, fmt.Errorf("解析 verify-prepare 回执失败: %w", err)

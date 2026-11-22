@@ -154,11 +154,41 @@
                                         >Sessions: <b>{{ h.sessions_count || 0 }}</b></span
                                     >
                                     <span v-if="showsTurns(h)"
+                                        :title="t('plugin.rolling-memory.episodic.turnsScopeHint', { n: h.out_of_scope_turns_count || 0, incomplete: h.incomplete_turns_count || 0 })"
                                         >Turns: <b>{{ h.synced_turns_count || 0 }}/{{ h.local_turns_count || 0 }}</b></span
                                     >
                                     <span v-if="showsTurns(h) && h.unsynced_turns_count > 0" class="pending-num">
                                         +{{ h.unsynced_turns_count }} {{ t('plugin.rolling-memory.overview.pendingSyncLbl') }}
                                     </span>
+                                    <el-tag
+                                        v-if="h.excluded_subagent_sources_count > 0"
+                                        size="small"
+                                        type="info"
+                                        effect="plain"
+                                        :title="t('plugin.rolling-memory.episodic.subagentsExcludedHint')"
+                                    >
+                                        {{ t('plugin.rolling-memory.episodic.subagentsExcludedLbl', { n: h.excluded_subagent_sources_count }) }}
+                                    </el-tag>
+                                </div>
+                                <div class="hp-stats" v-if="h.detected && h.turns_scan_supported !== true">
+                                    <el-tag
+                                        size="small"
+                                        type="info"
+                                        effect="plain"
+                                        :title="t('plugin.rolling-memory.episodic.noTurnScannerHint')"
+                                    >
+                                        {{ t('plugin.rolling-memory.episodic.noTurnScannerLbl') }}
+                                    </el-tag>
+                                </div>
+                                <div class="hp-stats" v-if="h.id === 'doubao' && h.turns_scan_supported === true">
+                                    <el-tag
+                                        size="small"
+                                        type="info"
+                                        effect="plain"
+                                        :title="t('plugin.rolling-memory.episodic.doubaoExportHint')"
+                                    >
+                                        {{ t('plugin.rolling-memory.episodic.doubaoExportLbl') }}
+                                    </el-tag>
                                 </div>
                                 <!-- 单胜者的 ACTIVE 只标当前环境：其余宿主用最后活动时间如实呈现
                                      自己的活跃度，不引入任何时间窗阈值。 -->

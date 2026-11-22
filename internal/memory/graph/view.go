@@ -76,7 +76,6 @@ func (b *Builder) View(ctx context.Context, req graphmodel.ViewRequest) (*graphm
 		totalFiltered:  totalFiltered,
 		labels:         map[uint64]string{},
 		groupSurface:   map[uint64]map[string]int{},
-		termGroups:     map[uint64]uint64{},
 		termMass:       map[uint64]float64{},
 		wordAgg:        map[uint64]*wordAgg{},
 		phraseAgg:      map[phraseKey]*phraseAgg{},
@@ -139,7 +138,6 @@ type viewState struct {
 
 	labels       map[uint64]string
 	groupSurface map[uint64]map[string]int
-	termGroups   map[uint64]uint64
 	termMass     map[uint64]float64
 
 	wordAgg   map[uint64]*wordAgg
@@ -152,10 +150,11 @@ type viewState struct {
 }
 
 type hydratedUnit struct {
-	unit    *Unit
-	summary string
-	span    string
-	phrases []rawPhrase
+	unit     *Unit
+	summary  string
+	span     string
+	phrases  []rawPhrase
+	surfaces map[uint64]map[string]int
 }
 
 type rawPhrase struct {
@@ -210,37 +209,111 @@ func (s *viewState) hydrate(ctx context.Context) {
 		if err := ctx.Err(); err != nil {
 			break
 		}
-		vu := &hydratedUnit{unit: u, summary: u.Summary, span: u.Span}
-		if i < hydrateBudget && time.Since(started) <= maxHydrateBudget {
-			raw, _, _, err := s.builder.vault.LoadLocalDocument(u.Row.UnitID)
-			if err == nil && strings.TrimSpace(raw) != "" {
-				text := raw
-				if len([]rune(text)) > maxGraphTextRunes {
-					text = string([]rune(text)[:maxGraphTextRunes])
+		var vu *hydratedUnit
+		if i < hydrateBudget {
+			vu = s.builder.cachedHydratedUnit(s.snap, u)
+		}
+		if vu == nil {
+			vu = &hydratedUnit{
+				unit:     u,
+				summary:  u.Summary,
+				span:     u.Span,
+				surfaces: map[uint64]map[string]int{},
+			}
+			if i < hydrateBudget && time.Since(started) <= maxHydrateBudget {
+				raw, _, _, err := s.builder.vault.LoadLocalDocument(u.Row.UnitID)
+				if err == nil && strings.TrimSpace(raw) != "" {
+					text := raw
+					if len([]rune(text)) > maxGraphTextRunes {
+						text = string([]rune(text)[:maxGraphTextRunes])
+					}
+					if summary := firstSentence(text, 54); summary != "" {
+						vu.summary = summary
+					}
+					vu.span = clipText(text, maxGraphSpanRunes)
+					extractLexical(s.builder.vault, s.snap, vu, text)
+					s.builder.storeHydratedUnit(s.snap, vu)
 				}
-				if summary := firstSentence(text, 54); summary != "" {
-					vu.summary = summary
-				}
-				vu.span = clipText(text, maxGraphSpanRunes)
-				s.extractLexical(vu, text)
 			}
 		}
-		s.units = append(s.units, vu)
+		s.mergeHydrated(vu)
 	}
 }
 
-func (s *viewState) extractLexical(vu *hydratedUnit, text string) {
-	if s.snap.engine == nil || vu.unit == nil {
+// mergeHydrated folds one hydrated unit's lexical projection into the view
+// aggregates. The cached payload itself stays immutable across views.
+func (s *viewState) mergeHydrated(vu *hydratedUnit) {
+	if vu == nil {
 		return
 	}
-	if vu.unit.HasEngine && vu.unit.EngineIndex >= 0 {
-		s.snap.engine.ForEachDocEntry(int(vu.unit.EngineIndex), func(entry core.DocEntryView) {
-			if entry.ID != 0 && entry.Group != 0 {
-				s.termGroups[entry.ID] = entry.Group
-			}
-		})
+	for group, counts := range vu.surfaces {
+		dst := s.groupSurface[group]
+		if dst == nil {
+			dst = make(map[string]int, len(counts))
+			s.groupSurface[group] = dst
+		}
+		for surface, count := range counts {
+			dst[surface] += count
+		}
 	}
-	pkt, _ := s.builder.vault.PackBlindPacket(vu.unit.Row.UnitID, text, vu.unit.Row.OccurredAt)
+	s.units = append(s.units, vu)
+}
+
+// cachedHydratedUnit returns a copy of one cached unit projection, rebinding
+// the snapshot-local *Unit pointer. Snapshots are immutable, so a cached
+// projection stays valid until the builder's snapshot key changes.
+func (b *Builder) cachedHydratedUnit(snap *Snapshot, u *Unit) *hydratedUnit {
+	if b == nil || snap == nil || u == nil {
+		return nil
+	}
+	b.lexMu.Lock()
+	defer b.lexMu.Unlock()
+	if b.lexKey != snap.Key {
+		b.lexKey = snap.Key
+		b.lexCache = make(map[string]*hydratedUnit, hydratedCacheLimit)
+		b.lexOrder = nil
+		return nil
+	}
+	cached := b.lexCache[u.Row.UnitID]
+	if cached == nil {
+		return nil
+	}
+	clone := *cached
+	clone.unit = u
+	return &clone
+}
+
+// storeHydratedUnit publishes one freshly hydrated projection into the
+// per-snapshot cache with insertion-order eviction.
+func (b *Builder) storeHydratedUnit(snap *Snapshot, vu *hydratedUnit) {
+	if b == nil || snap == nil || vu == nil || vu.unit == nil {
+		return
+	}
+	b.lexMu.Lock()
+	defer b.lexMu.Unlock()
+	if b.lexKey != snap.Key {
+		b.lexKey = snap.Key
+		b.lexCache = make(map[string]*hydratedUnit, hydratedCacheLimit)
+		b.lexOrder = nil
+	}
+	id := vu.unit.Row.UnitID
+	if _, exists := b.lexCache[id]; exists {
+		return
+	}
+	if len(b.lexOrder) >= hydratedCacheLimit {
+		oldest := b.lexOrder[0]
+		b.lexOrder = b.lexOrder[1:]
+		delete(b.lexCache, oldest)
+	}
+	b.lexCache[id] = vu
+	b.lexOrder = append(b.lexOrder, id)
+}
+
+func extractLexical(vault *localvault.Vault, snap *Snapshot, vu *hydratedUnit, text string) {
+	if snap == nil || snap.engine == nil || vu == nil || vu.unit == nil {
+		return
+	}
+	pkt, _ := vault.PackBlindPacket(vu.unit.Row.UnitID, text, vu.unit.Row.OccurredAt)
 	overlapPairs := hanRunWindowPairs(text)
 	surfaces := make([]string, 0, 64)
 	for _, sentence := range plain.SplitSentences(text) {
@@ -256,20 +329,20 @@ func (s *viewState) extractLexical(vu *hydratedUnit, text string) {
 	for _, pair := range overlapPairs {
 		overlapSurfaces = append(overlapSurfaces, canonicalPhraseSurface(pair[0]), canonicalPhraseSurface(pair[1]))
 	}
-	hashes := s.builder.vault.SurfaceHashes(append(surfaces, overlapSurfaces...))
+	hashes := vault.SurfaceHashes(append(surfaces, overlapSurfaces...))
 	for _, surface := range surfaces {
 		hash := hashes[surface]
-		if hash == 0 || s.snap.engine.Index.TermDF(hash) <= 0 {
+		if hash == 0 || snap.engine.Index.TermDF(hash) <= 0 {
 			continue
 		}
-		group := s.termGroup(hash)
+		group := termGroupOf(snap, hash)
 		if group == 0 {
 			continue
 		}
-		counts := s.groupSurface[group]
+		counts := vu.surfaces[group]
 		if counts == nil {
 			counts = map[string]int{}
-			s.groupSurface[group] = counts
+			vu.surfaces[group] = counts
 		}
 		counts[surface]++
 	}
@@ -319,13 +392,13 @@ func (s *viewState) extractLexical(vu *hydratedUnit, text string) {
 		if _, skip := overlap[key]; skip {
 			return
 		}
-		if decomposedHanUnigrams(surfaceByHash, hashes, s.snap.engine.Index, key.a, key.b) {
+		if decomposedHanUnigrams(surfaceByHash, hashes, snap.engine.Index, key.a, key.b) {
 			return
 		}
 		if _, dup := seen[key]; dup {
 			return
 		}
-		profile, ok := s.snap.engine.PhraseEnergyVector(key.a, key.b)
+		profile, ok := snap.engine.PhraseEnergyVector(key.a, key.b)
 		if !ok || profile.BindingEnergyNats <= 0 {
 			return
 		}
@@ -338,7 +411,7 @@ func (s *viewState) extractLexical(vu *hydratedUnit, text string) {
 			return
 		}
 		seen[final] = struct{}{}
-		dfA, dfB, containment, lift := phraseEvidence(s.snap.engine.Index, profile)
+		dfA, dfB, containment, lift := phraseEvidence(snap.engine.Index, profile)
 		vu.phrases = append(vu.phrases, rawPhrase{
 			a:           a,
 			b:           b,
@@ -462,17 +535,12 @@ func decomposedHanUnigrams(surfaceByHash map[uint64]string, hashes map[string]ui
 }
 
 func (s *viewState) termGroup(term uint64) uint64 {
-	if group, ok := s.termGroups[term]; ok {
-		return group
-	}
-	group := term
-	if s.snap.engine != nil {
-		if profile, ok := s.snap.engine.TermEnergyVector(term); ok && profile.GroupID != 0 {
-			group = profile.GroupID
+	if s.snap != nil {
+		if group, ok := s.snap.TermGroup[term]; ok && group != 0 {
+			return group
 		}
 	}
-	s.termGroups[term] = group
-	return group
+	return term
 }
 
 func (s *viewState) termMassOf(group uint64) float64 {
@@ -1447,11 +1515,10 @@ func selectSeedUnits(snap *Snapshot, req graphmodel.ViewRequest, limit int, laye
 }
 
 func termGroupOf(snap *Snapshot, term uint64) uint64 {
-	if snap == nil || snap.engine == nil {
-		return term
-	}
-	if profile, ok := snap.engine.TermEnergyVector(term); ok && profile.GroupID != 0 {
-		return profile.GroupID
+	if snap != nil {
+		if group, ok := snap.TermGroup[term]; ok && group != 0 {
+			return group
+		}
 	}
 	return term
 }

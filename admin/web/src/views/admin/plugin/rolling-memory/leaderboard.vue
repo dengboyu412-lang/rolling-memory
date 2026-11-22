@@ -300,7 +300,7 @@
                         plain
                         @click="
                             copyText(
-                                'rmem eval --fetch locomo --accept-upstream-license',
+                                'rmem eval --fetch-only --fetch locomo --accept-upstream-license',
                                 'Copied LoCoMo fetch CLI',
                                 '已复制 LoCoMo 语料获取命令'
                             )

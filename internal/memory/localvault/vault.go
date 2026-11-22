@@ -984,6 +984,7 @@ func NewVault(db *sql.DB, explicitSecret []byte) (*Vault, error) {
 					return nil, err
 				}
 				ensureInsertedAtColumns(db)
+				ensureNoeticTraceColumns(db)
 				CoreSchemaContracts()
 				v := &Vault{
 					db:                   db,
@@ -2368,10 +2369,16 @@ func (v *Vault) buildCorpusSnapshot(ctx context.Context) (*vaultCorpusSnapshot, 
 		}
 	}
 
+	// rm_units 是 rm_docs × rm_unit_meta 的视图，没有 rowid；写入序指纹取规范表
+	// rm_docs.rowid，正文长度仍按视图（ref_pointer 会在视图中替代空正文）。
 	var docCnt, docRowSum, docMaxRowID, docTextLen int64
 	_ = v.db.QueryRowContext(
 		ctx,
-		`SELECT COUNT(*), COALESCE(SUM(rowid), 0), COALESCE(MAX(rowid), 0), COALESCE(SUM(LENGTH(raw_text)), 0) FROM rm_units`,
+		`SELECT
+			(SELECT COUNT(*) FROM rm_units),
+			(SELECT COALESCE(SUM(rowid), 0) FROM rm_docs),
+			(SELECT COALESCE(MAX(rowid), 0) FROM rm_docs),
+			(SELECT COALESCE(SUM(LENGTH(raw_text)), 0) FROM rm_units)`,
 	).Scan(&docCnt, &docRowSum, &docMaxRowID, &docTextLen)
 
 	var episodicRevision int64

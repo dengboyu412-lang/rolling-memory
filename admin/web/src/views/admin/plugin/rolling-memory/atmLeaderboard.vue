@@ -302,7 +302,7 @@
                         plain
                         @click="
                             copyText(
-                                'rmem eval --fetch atm --accept-upstream-license',
+                                'rmem eval --fetch-only --fetch atm --accept-upstream-license',
                                 'Copied corpus fetch command',
                                 '已复制上游语料获取命令'
                             )
@@ -772,7 +772,7 @@
                             <code class="rm-sha-code">{{ atmSpec.scoring_fixture_sha256 || '-' }}</code>
                             <el-tag size="small" :type="verificationType(atmSpec.scoring_fixture_status)">{{ verificationText(atmSpec.scoring_fixture_status) }}</el-tag>
                         </el-descriptions-item>
-                        <el-descriptions-item :label="isEn ? 'Answer fixture SHA-256' : '答题向量 SHA-256'">
+                        <el-descriptions-item :label="isEn ? 'Answer fixture SHA-256' : '答题夹具 SHA-256'">
                             <el-tag size="small" :type="verificationType(atmSpec.answer_fixture_status)">{{ verificationText(atmSpec.answer_fixture_status) }}</el-tag>
                         </el-descriptions-item>
                         <el-descriptions-item :label="isEn ? 'External corpus SHA-256' : '外部语料 SHA-256'">

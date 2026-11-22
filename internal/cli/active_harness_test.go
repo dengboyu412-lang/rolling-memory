@@ -209,24 +209,27 @@ func TestHarnessCountCacheInvalidatesOnVaultCountChange(t *testing.T) {
 		t.Fatalf("create meta: %v", err)
 	}
 
-	storeHarnessCountCache(vdb, "zcode", home, 100, 12, 80, 20, 100, 1700000000)
+	storeHarnessCountCache(vdb, "zcode", home, 100, 0, 12, 80, 20, 100, 0, 0, 1700000000, true)
 
-	if cached, ok := loadHarnessCountCache(vdb, "zcode", home, 100); !ok || cached.Synced != 80 || cached.Unsynced != 20 {
+	if cached, ok := loadHarnessCountCache(vdb, "zcode", home, 100, 0); !ok || cached.Synced != 80 || cached.Unsynced != 20 {
 		t.Fatalf("unchanged vault cache = %+v, %v", cached, ok)
 	}
 	for _, vaultUnits := range []int{105, 130, 99} {
-		if cached, ok := loadHarnessCountCache(vdb, "zcode", home, vaultUnits); ok {
+		if cached, ok := loadHarnessCountCache(vdb, "zcode", home, vaultUnits, 0); ok {
 			t.Fatalf("vault count %d must trigger a rescan, got %+v", vaultUnits, cached)
 		}
 	}
-	if cached, ok := loadHarnessCountCache(vdb, "zcode", home, 100); !ok || cached.Synced != 80 || cached.Unsynced != 20 {
+	if cached, ok := loadHarnessCountCache(vdb, "zcode", home, 100, 0); !ok || cached.Synced != 80 || cached.Unsynced != 20 {
 		t.Fatalf("other-harness growth must not mutate cached counts: %+v, %v", cached, ok)
+	}
+	if cached, ok := loadHarnessCountCache(vdb, "zcode", home, 100, 1700000000); ok {
+		t.Fatalf("changed ingest bound must trigger a rescan, got %+v", cached)
 	}
 	legacy := `{"fp":1,"vault":100,"computed_at":` + fmt.Sprint(time.Now().Unix()) + `,"local_turns":100,"synced":85,"unsynced":15}`
 	if _, err := vdb.Exec(`UPDATE rm_meta SET v = ? WHERE k = ?`, []byte(legacy), harnessCountCachePrefix+"zcode"); err != nil {
 		t.Fatal(err)
 	}
-	if cached, ok := loadHarnessCountCache(vdb, "zcode", home, 100); ok {
+	if cached, ok := loadHarnessCountCache(vdb, "zcode", home, 100, 0); ok {
 		t.Fatalf("legacy row may contain guessed attribution: %+v", cached)
 	}
 }

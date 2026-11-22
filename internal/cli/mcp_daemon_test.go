@@ -78,7 +78,7 @@ func TestDaemonRecallUsesCallerConfig(t *testing.T) {
 	}
 }
 
-func TestDaemonRecallDoesNotRetryAfterDisconnect(t *testing.T) {
+func TestDaemonRecallRetriesOnceAfterDisconnect(t *testing.T) {
 	env := newEnv(t)
 	dir, err := os.MkdirTemp("/tmp", "rm-cli-disconnect-")
 	if err != nil {
@@ -116,9 +116,13 @@ func TestDaemonRecallDoesNotRetryAfterDisconnect(t *testing.T) {
 	})}
 	go func() { _ = server.Serve(listener) }()
 	defer server.Close()
+	// A post-send disconnect is a transient transport failure; recall is
+	// read-only, so the caller retries once. This listener closes every request,
+	// so the second attempt also fails and the command must still fail without
+	// opening an in-process fallback.
 	result := run(t, "recall", "--q", "test", "--json")
-	if result.code == 0 || calls.Load() != 1 {
-		t.Fatalf("post-send disconnect must fail without retry: code=%d calls=%d output=%s", result.code, calls.Load(), result.stdout)
+	if result.code == 0 || calls.Load() != 2 {
+		t.Fatalf("post-send disconnect must fail after one retry: code=%d calls=%d output=%s", result.code, calls.Load(), result.stdout)
 	}
 	if _, err := os.Stat(filepath.Join(env.base, "memory.db")); !os.IsNotExist(err) {
 		t.Fatalf("in-process fallback opened the database: %v", err)

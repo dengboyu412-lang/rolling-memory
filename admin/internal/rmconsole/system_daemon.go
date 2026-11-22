@@ -134,6 +134,7 @@ func systemMemoryLimitHandler(c *gin.Context) {
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), systemConfigTimeout)
 	defer cancel()
+	before, _ := readConfigMemoryLimit(ctx, bin)
 	if _, err := systemCLIRunner(ctx, bin, []string{"config", "set", "daemon.memory_limit", value}); err != nil {
 		httpx.Fail(c, httpx.WithMessage("写入内存上限失败: "+err.Error()))
 		return
@@ -143,10 +144,11 @@ func systemMemoryLimitHandler(c *gin.Context) {
 		httpx.Fail(c, httpx.WithMessage("读取配置失败: "+err.Error()))
 		return
 	}
+	restartRequired := !strings.EqualFold(strings.TrimSpace(before), strings.TrimSpace(current))
 	invalidateEnvHealthCache(home)
 	httpx.Success(c, httpx.WithData(gin.H{
 		"memory_limit":     current,
-		"restart_required": true,
+		"restart_required": restartRequired,
 	}))
 }
 

@@ -32,7 +32,7 @@ const (
 // layerListQuery 三层统一列表的只读查询参数（全部来自 BuildAdmin TableManager 契约）。
 type layerListQuery struct {
 	layer   string // "" | background | episodic | noetic
-	status  string // "" | active | stale（与历史口径一致：只作用于 L3）
+	status  string // "" | active | stale | superseded（作用于 L3；stale 与 superseded 都属非 active）
 	dirID   string // L1 挂载目录过滤
 	relPath string // L1 相对路径过滤（小写）
 	keyword string // 页内快搜关键词（小写）
@@ -869,7 +869,10 @@ func queryLayerRows(dbPath string, q layerListQuery, home string) ([]ThreeLayerR
 			if q.status == "active" {
 				noeticWhere = "COALESCE(NULLIF(status, ''), 'active') = 'active'"
 			} else if q.status == "stale" {
-				noeticWhere = "COALESCE(NULLIF(status, ''), 'active') = 'stale'"
+				// The panel's "stale" scope covers every non-active lifecycle
+				// state: true staleness (invalidated citations) and superseded
+				// historical versions. The count and purge action share it.
+				noeticWhere = "COALESCE(NULLIF(status, ''), 'active') <> 'active'"
 			}
 			branches = append(branches, fmt.Sprintf(`SELECT * FROM (
 					SELECT 'noetic' AS layer, 'noetic' AS src, noetic_id AS id,

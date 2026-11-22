@@ -33,6 +33,14 @@ type Builder struct {
 	viewKey  string
 	viewAt   time.Time
 	viewResp *graphmodel.Response
+
+	// lexMu guards the per-snapshot unit hydration cache. Resolving a unit's
+	// plaintext can read a harness transcript through a @ref pointer, so view
+	// shape changes (capacity, layers, keyword) must not re-read the same unit.
+	lexMu    sync.Mutex
+	lexKey   string
+	lexCache map[string]*hydratedUnit
+	lexOrder []string
 }
 
 // snapshotReuseWindow bounds how often a full engine projection rebuild can run.
@@ -41,6 +49,11 @@ type Builder struct {
 // cluster. A short window keeps the graph responsive and still converges after
 // new writes on the next request past the window.
 const snapshotReuseWindow = 30 * time.Second
+
+// hydratedCacheLimit bounds the per-snapshot hydration cache. Every entry holds
+// one unit's projected span and lexical aggregates (no source text), so the cap
+// stays well under the graph body budget while covering full-domain views.
+const hydratedCacheLimit = 4096
 
 // NewBuilder returns a graph builder bound to one local vault.
 func NewBuilder(vault *localvault.Vault) *Builder {
@@ -61,6 +74,11 @@ func (b *Builder) Invalidate() {
 	b.viewAt = time.Time{}
 	b.viewResp = nil
 	b.viewMu.Unlock()
+	b.lexMu.Lock()
+	b.lexKey = ""
+	b.lexCache = nil
+	b.lexOrder = nil
+	b.lexMu.Unlock()
 }
 
 // Snapshot returns the cached snapshot, rebuilding it when the corpus
@@ -103,6 +121,7 @@ func (b *Builder) Snapshot(ctx context.Context) (*Snapshot, error) {
 			Citations:      citations,
 			CitedBy:        map[string][]string{},
 			GroupEnergy:    map[uint64]float64{},
+			TermGroup:      map[uint64]uint64{},
 			BuiltAt:        time.Now(),
 		}
 		b.key = key
@@ -148,8 +167,13 @@ type Snapshot struct {
 	CitedBy          map[string][]string
 	GroupEnergy      map[uint64]float64
 	GroupMean        float64
-	BuiltAt          time.Time
-	BuildMS          int64
+	// TermGroup is the canonical word-family container per indexed term: the
+	// minimum parent group observed across every unit, exactly the identity the
+	// retrieval engine's cluster state uses. Building it once per snapshot keeps
+	// per-view label projection O(1) per term instead of a full partner scan.
+	TermGroup map[uint64]uint64
+	BuiltAt   time.Time
+	BuildMS   int64
 
 	engine *core.Engine
 }
@@ -204,6 +228,7 @@ func (b *Builder) build(ctx context.Context, rows []graphmodel.UnitRow, citation
 		Citations:        citations,
 		CitedBy:          make(map[string][]string, len(citations)),
 		GroupEnergy:      make(map[uint64]float64, 1024),
+		TermGroup:        make(map[uint64]uint64, 1<<16),
 		BuiltAt:          time.Now(),
 	}
 	for noeticID, cited := range citations {
@@ -411,6 +436,26 @@ func (b *Builder) build(ctx context.Context, rows []graphmodel.UnitRow, citation
 		}
 
 		snap.Units = units
+
+		// Canonical term → word-family container for the view projection. The
+		// engine's cluster state resolves a term's parent as the minimum group
+		// observed across its document entries; reproducing that pass once per
+		// snapshot keeps label projection O(1) per term instead of issuing a
+		// full energy-profile partner scan for every uncached term.
+		for u := 0; u < eng.Index.N; u++ {
+			eng.ForEachDocEntry(u, func(entry core.DocEntryView) {
+				if entry.ID == 0 {
+					return
+				}
+				group := entry.Group
+				if group == 0 {
+					group = entry.ID
+				}
+				if prev, ok := snap.TermGroup[entry.ID]; !ok || group < prev {
+					snap.TermGroup[entry.ID] = group
+				}
+			})
+		}
 		return nil
 	})
 	if err != nil {

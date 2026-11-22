@@ -1092,7 +1092,13 @@ func computeAdminDBFingerprint(memoryPath, scope string) string {
 	var createdAt, engine, firstDocID string
 	_ = db.QueryRow(`SELECT coalesce(value, '') FROM db_meta WHERE key = 'created_at'`).Scan(&createdAt)
 	_ = db.QueryRow(`SELECT coalesce(value, '') FROM db_meta WHERE key = 'engine'`).Scan(&engine)
-	_ = db.QueryRow(`SELECT coalesce(doc_id, '') FROM rm_units ORDER BY occurred_at ASC, rowid ASC LIMIT 1`).Scan(&firstDocID)
+	// rm_units 是视图（无 rowid）；与疗效账本 ComputeDBFingerprint 同源，按规范表
+	// rm_docs 的最早写入行取锚，保证两侧指纹逐位一致。旧夹具只有 rm_units 表时
+	// 退化为按 doc_id 定序，仍保持确定性（不把空锚误报成身份失效）。
+	_ = db.QueryRow(`SELECT coalesce(unit_id, '') FROM rm_docs ORDER BY occurred_at ASC, rowid ASC LIMIT 1`).Scan(&firstDocID)
+	if strings.TrimSpace(firstDocID) == "" {
+		_ = db.QueryRow(`SELECT coalesce(doc_id, '') FROM rm_units ORDER BY occurred_at ASC, doc_id ASC LIMIT 1`).Scan(&firstDocID)
+	}
 	if strings.TrimSpace(firstDocID) == "" {
 		_ = db.QueryRow(`SELECT coalesce(noetic_id, '') FROM rm_noetic ORDER BY occurred_at ASC, rowid ASC LIMIT 1`).Scan(&firstDocID)
 	}
@@ -1410,7 +1416,7 @@ func computeROIFactsVaultBundle(memoryPath string) (vaultAnalyticsBundle, string
 
 	_ = db.QueryRowContext(ctx, `
 			SELECT COALESCE(SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END), 0),
-			       COALESCE(SUM(CASE WHEN status != 'active' THEN 1 ELSE 0 END), 0),
+			       COALESCE(SUM(CASE WHEN status = 'stale' THEN 1 ELSE 0 END), 0),
 			       COALESCE(SUM(CASE WHEN status = 'active' AND cited_unit_ids_json NOT IN ('', '[]') THEN 1 ELSE 0 END), 0)
 			FROM rm_noetic`,
 	).Scan(&vault.NoeticUnits, &vault.NoeticStale, &vault.NoeticWithCitations)

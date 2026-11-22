@@ -5,8 +5,29 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"testing"
 )
+
+// TestGraphVaultFingerprintUsesCanonicalTable 锁定 rm_units 视图没有 rowid 的事实：
+// 指纹必须从规范表 rm_docs 取写入序上界，否则查询恒失败、图谱领域缓存永不命中。
+func TestGraphVaultFingerprintUsesCanonicalTable(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "graph-fingerprint.db")
+	db, err := openWritableVaultDB(dbPath)
+	if err != nil {
+		t.Fatalf("openWritableVaultDB: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO rm_units(doc_id, layer, occurred_at, raw_text) VALUES ('ep-fp', 'episodic', 1700000000, 'fingerprint')`); err != nil {
+		db.Close()
+		t.Fatalf("insert rm_units: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close vault: %v", err)
+	}
+	if fp := graphVaultFingerprint(dbPath); fp == "" {
+		t.Fatal("graphVaultFingerprint returned empty on the canonical rm_units view")
+	}
+}
 
 func TestGraphHandlerRelaysEngineProjection(t *testing.T) {
 	home := t.TempDir()

@@ -495,7 +495,7 @@ const harnessEpisodeSyncMetaKey = "harness_episodic_synced_mtime"
 // keep the auto-sync gate permanently dirty.
 func harnessTranscriptPatterns(home string) []string {
 	var patterns []string
-	for _, id := range []string{"zcode", "claude-code", "codex", "dsh", "codebuddy", "workbuddy"} {
+	for _, id := range []string{"zcode", "claude-code", "codex", "dsh", "codebuddy", "workbuddy", "doubao"} {
 		if !harnessTurnsScannable(id) {
 			continue
 		}
@@ -521,6 +521,8 @@ func latestHarnessTranscriptMTime(home string) int64 {
 		filepath.Join(harness.ResolveDSHHome(home), "sessions"),
 		filepath.Join(home, ".codebuddy", "projects"),
 		filepath.Join(home, ".workbuddy", "projects"),
+		filepath.Join(home, "Doubao", "exports"),
+		filepath.Join(home, ".doubao", "exports"),
 	} {
 		if st, err := os.Stat(rel); err == nil && st.ModTime().Unix() > latest {
 			latest = st.ModTime().Unix()

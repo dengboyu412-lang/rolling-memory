@@ -99,6 +99,13 @@ episodic:
     pageSub: 'Built only from Harness dialogue records: background auto-sync + historical session reconcile. Local folder files never enter this layer (files belong to L1 Docs & Code)'
     reconcileSuccess: 'L2 aligned: +{har} Harness turns imported · +{epi} synced (Harness dialogue stays in L2, never L1)'
     reconcileSuccessLocal: 'L2 locally aligned: +{har} Harness turns imported (local mode makes zero cloud requests)'
+    subagentsExcludedLbl: 'Subagent sources excluded: {n}'
+    subagentsExcludedHint: 'Automatic capture reads main sessions within the documented coverage. Subagent dialogue is not guaranteed, is not a read failure, and is not counted as pending turns.'
+    turnsScopeHint: 'Turns count importable dialogue only: {n} historical units predate sync.since and are not imported; {incomplete} have no confirmed completion.'
+    noTurnScannerLbl: 'No automatic turn scanner'
+    noTurnScannerHint: 'This host has no local conversation reader yet, so it does not participate in L2 turn alignment and is not counted as pending.'
+    doubaoExportLbl: 'Doubao export folder'
+    doubaoExportHint: 'Place Doubao conversation JSONL exports in ~/Doubao/exports/ (one file per conversation); the background scanner imports them automatically.'
     unitsTitle: Session Units (L2)
     syncActiveHarnessBtn: 'Sync Active Harness ({name})'
     syncAllHarnessesBtn: Sync All Local Harnesses
@@ -130,9 +137,9 @@ noetic:
     reconcileSuccess: 'L3 aligned: +{noe} recall entries (Agent cue + cited evidence)'
     reconcileSuccessLocal: 'L3 needs no reconcile in local mode: recall entries are written locally by Agent recall (zero cloud requests)'
     unitsTitle: Recall Trail (L3)
-    purgeStaleBtn: 'Purge Stale ({n})'
-    purgeStaleConfirm: 'Permanently remove all {n} stale recall entries?'
-    purgeStaleSuccess: Purged all stale entries
+    purgeStaleBtn: 'Purge Stale / Superseded ({n})'
+    purgeStaleConfirm: 'Permanently remove all {n} stale or superseded recall entries?'
+    purgeStaleSuccess: Purged all stale and superseded entries
     goRecallBtn: Open Recall Debugger
     replayBtn: Replay in Debugger
 overview:
@@ -225,7 +232,7 @@ browser:
     refreshBtn: Refresh
     statusAll: All statuses
     statusActive: active
-    statusStale: stale
+    statusStale: stale / superseded
     colStatus: Status
     colFileChunk: File · Chunk
     empty: No memory units yet (mount folders in L1 Docs & Code; L3 fills automatically from Agent recalls)
@@ -313,7 +320,7 @@ eval:
     clearEval: Clear Eval Scope
     intro1Title: '1. Authoritative Benchmark Corpus: LoCoMo 10 Long-Horizon Dialogues (ACL 2024)'
     intro1Badge: 'SHA256 Locked'
-    intro1Body: "Evaluation uses Maharana et al.'s 10 multi-session dialogues (5,882 turns) and the upstream-official Cat 1–4 question set (1,540 Qs: Cat 4 Single-hop 841 · Cat 2 Temporal 321 · Cat 1 Multi-hop 282 · Cat 3 Open-domain 96, with official evidence). The benchmark corpus is released upstream under CC BY-NC 4.0 and is not bundled: run rmem eval --fetch locomo --accept-upstream-license to fetch and rebuild the official set locally, or import your own locomo10.json; every run verifies the SHA-256 digests. ATM-Bench data is likewise one command away: rmem eval --fetch atm --accept-upstream-license."
+    intro1Body: "Evaluation uses Maharana et al.'s 10 multi-session dialogues (5,882 turns) and the upstream-official Cat 1–4 question set (1,540 Qs: Cat 4 Single-hop 841 · Cat 2 Temporal 321 · Cat 1 Multi-hop 282 · Cat 3 Open-domain 96, with official evidence). The benchmark corpus is released upstream under CC BY-NC 4.0 and is not bundled: run rmem eval --fetch-only --fetch locomo --accept-upstream-license to fetch and rebuild the official set locally, or import your own locomo10.json; every run verifies the SHA-256 digests. ATM-Bench data is likewise one command away: rmem eval --fetch-only --fetch atm --accept-upstream-license."
     intro2Title: '2. Zero-Bias Protocol: locomo-backboard Frozen Pair'
     intro2Badge: '3 SHA1 Pins Locked'
     intro2Body: 'Replicates the official local-qa-judge (locomo-frozen-2026-10-11) protocol stack byte-for-byte — locomo-answer and locomo-judge (1,694-byte prompt emitting CORRECT / WRONG) — verified via 3 fail-closed SHA1 pins. Run 0-LLM retrieval verification at $0 cost offline, or configure your own LLM (at your own token cost) to reproduce end-to-end QA judge scores.'

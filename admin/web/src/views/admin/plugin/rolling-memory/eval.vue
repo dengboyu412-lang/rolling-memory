@@ -1706,12 +1706,12 @@
                                         {{ verificationText(overview.protocol_spec?.prompt_pins_status) }}
                                     </el-tag>
                                 </el-descriptions-item>
-                                <el-descriptions-item :label="isEn ? 'Scoring fixture SHA-256' : '判分向量 SHA-256'">
+                                <el-descriptions-item :label="isEn ? 'Scoring fixture SHA-256' : '评分夹具 SHA-256'">
                                     <el-tag size="small" :type="verificationType(overview.protocol_spec?.scoring_fixture_status)">
                                         {{ verificationText(overview.protocol_spec?.scoring_fixture_status) }}
                                     </el-tag>
                                 </el-descriptions-item>
-                                <el-descriptions-item :label="isEn ? 'Answer fixture SHA-256' : '答题向量 SHA-256'">
+                                <el-descriptions-item :label="isEn ? 'Answer fixture SHA-256' : '答题夹具 SHA-256'">
                                     <el-tag size="small" :type="verificationType(overview.protocol_spec?.answer_fixture_status)">
                                         {{ verificationText(overview.protocol_spec?.answer_fixture_status) }}
                                     </el-tag>
@@ -2208,8 +2208,8 @@
             <p v-if="!evalCorpusReady" style="margin: 10px 2px 0; font-size: 12px; line-height: 1.7; color: var(--el-text-color-secondary)">
                 {{
                     isEn
-                        ? 'The benchmark corpus is not bundled: obtain it from the upstream project. For ATM-Bench, one CLI command fetches the required files (~35 MB), rebuilds them locally and verifies the digests: rmem eval --fetch atm --accept-upstream-license'
-                        : '基准语料不随产品分发：请从上游项目获取。ATM-Bench 可用一条命令获取必要文件（约 35 MB）、在本机重建并校验摘要：rmem eval --fetch atm --accept-upstream-license'
+                        ? 'The benchmark corpus is not bundled: obtain it from the upstream project. For ATM-Bench, one CLI command fetches the required files (~35 MB), rebuilds them locally and verifies the digests: rmem eval --fetch-only --fetch atm --accept-upstream-license'
+                        : '基准语料不随产品分发：请从上游项目获取。ATM-Bench 可用一条命令获取必要文件（约 35 MB）、在本机重建并校验摘要：rmem eval --fetch-only --fetch atm --accept-upstream-license'
                 }}
             </p>
             <el-descriptions :column="1" border size="small" style="margin-top: 12px">
@@ -2888,7 +2888,8 @@ const evalStorePath = computed(() => {
 const evalCorpusReady = computed(() => {
     const manifest = evalManifest.value
     if (overview.value.readiness?.ready !== true || !manifest) return false
-    if (evalConfig.arm_mode === 'oracle') return false
+    // 现役唯一评测臂是 sdk-local-plain；oracle 与任何未登记臂都不具备可复用语料。
+    if (evalConfig.arm_mode !== 'sdk-local-plain') return false
     const transport = 'ramesdk.local_plain.offline-v1'
     const endpoint = String(manifest.endpoint || '')
     return (

@@ -4,7 +4,9 @@
 package cli_test
 
 import (
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/rocareer/rolling-memory/internal/config"
 	"github.com/rocareer/rolling-memory/internal/text"
+	_ "modernc.org/sqlite"
 )
 
 // writeActiveWorkspacePresence 以 hook 写侧的同一形状落一条短租约会话记录。
@@ -186,7 +189,7 @@ func TestSyncReconcileImportsWorkBuddyJSONLTurns(t *testing.T) {
 	}
 }
 
-func TestSyncStatusAggregatesHostsAndReportsUnknown(t *testing.T) {
+func TestSyncStatusReportsIncompleteTurnsAsScopeNotPending(t *testing.T) {
 	env := newEnv(t)
 	dbPath := filepath.Join(env.base, "multi-host.db")
 	t.Setenv("ROLLING_MEMORY_HARNESS", "claude-code")
@@ -212,15 +215,70 @@ func TestSyncStatusAggregatesHostsAndReportsUnknown(t *testing.T) {
 	payload := runStatusJSON(t, dbPath)
 	layers, _ := payload["layers"].(map[string]any)
 	epi, _ := layers["episodic"].(map[string]any)
-	if epi["harness_unsynced_turns"] != float64(4) || epi["aligned"] != false || epi["alignment_known"] != false {
+	// A turn without confirmed completion is not importable by contract, so it is
+	// a known scope exclusion rather than pending work or unknown coverage.
+	if epi["harness_unsynced_turns"] != nil || epi["aligned"] != true || epi["alignment_known"] != true {
 		t.Fatalf("multi-host status = %+v", epi)
 	}
-	if payload["total_pending_sync"].(float64) < 4 {
-		t.Fatalf("pending count omitted a host: %+v", payload)
+	if payload["total_pending_sync"].(float64) != 0 {
+		t.Fatalf("incomplete turns counted as pending: %+v", payload)
+	}
+	for _, id := range []string{"claude-code", "codex"} {
+		item := harnessItem(t, payload, id)
+		if item["local_turns_count"] != float64(0) || item["incomplete_turns_count"] != float64(2) {
+			t.Fatalf("%s status = %+v", id, item)
+		}
 	}
 }
 
-func TestSyncStatusExcludedSubagentIsUnknown(t *testing.T) {
+// TestSyncStatusScopesCountsToIngestBound locks the dashboard contract for a
+// configured sync.since lower bound: history older than the bound is outside the
+// vault's collection scope, so it is neither pending work nor an alignment gap.
+// Only turns the importer would actually store drive the unsynced count.
+func TestSyncStatusScopesCountsToIngestBound(t *testing.T) {
+	env := newEnv(t)
+	now := time.Now()
+	t.Setenv("ROLLING_MEMORY_SYNC_SINCE", now.Add(-time.Hour).Format(time.RFC3339))
+	path := filepath.Join(os.Getenv("HOME"), ".claude", "projects", "demo", "bounded.jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldTS := now.Add(-2 * time.Hour).Format(time.RFC3339)
+	newTS := now.Add(-10 * time.Minute).Format(time.RFC3339)
+	body := fmt.Sprintf(
+		`{"timestamp":%q,"type":"user","message":{"role":"user","content":"bound old question"}}`+"\n"+
+			`{"timestamp":%q,"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":"bound old answer"}}`+"\n"+
+			`{"timestamp":%q,"type":"user","message":{"role":"user","content":"bound new question"}}`+"\n"+
+			`{"timestamp":%q,"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":"bound new answer"}}`+"\n",
+		oldTS, oldTS, newTS, newTS)
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	dbPath := filepath.Join(env.base, "bounded.db")
+	st := runStatusJSON(t, dbPath)
+	item := harnessItem(t, st, "claude-code")
+	if item["local_turns_count"] != float64(2) || item["unsynced_turns_count"] != float64(2) || item["out_of_scope_turns_count"] != float64(2) {
+		t.Fatalf("bounded status = %+v", item)
+	}
+
+	res := run(t, "sync", "reconcile", "--db", dbPath, "--harness", "claude-code", "--layer", "episodic", "--json")
+	if res.code != 0 {
+		t.Fatalf("reconcile exit=%d stdout=%s stderr=%s", res.code, res.stdout, res.stderr)
+	}
+	rep := jsonObject(t, res.stdout)
+	if rep["episodic_imported_from_harness"] != float64(2) {
+		t.Fatalf("bounded reconcile imported = %+v, want 2 in-bound units", rep["episodic_imported_from_harness"])
+	}
+	payload := runStatusJSON(t, dbPath)
+	item = harnessItem(t, payload, "claude-code")
+	layer := payload["layers"].(map[string]any)["episodic"].(map[string]any)
+	if item["unsynced_turns_count"] != float64(0) || layer["aligned"] != true || layer["alignment_known"] != true {
+		t.Fatalf("bounded status after reconcile = item %+v layer %+v", item, layer)
+	}
+}
+
+func TestSyncStatusExcludedSubagentIsKnownScope(t *testing.T) {
 	env := newEnv(t)
 	home := os.Getenv("HOME")
 	main := filepath.Join(home, ".claude", "projects", "demo", "main.jsonl")
@@ -254,8 +312,127 @@ func TestSyncStatusExcludedSubagentIsUnknown(t *testing.T) {
 	if err := os.WriteFile(child, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if layer := getLayer(); layer["alignment_known"] != false || layer["aligned"] != false {
-		t.Fatalf("excluded subagent reported aligned: %+v", layer)
+	payload := runStatusJSON(t, dbPath)
+	layer := payload["layers"].(map[string]any)["episodic"].(map[string]any)
+	// Subagent transcripts are a documented collection-scope limit, not an
+	// unreadable source: the supported scope stays aligned and the exclusion is
+	// reported as a count on the harness item.
+	if layer["alignment_known"] != true || layer["aligned"] != true {
+		t.Fatalf("excluded subagent poisoned supported-scope alignment: %+v", layer)
+	}
+	item := harnessItem(t, payload, "claude-code")
+	if item["excluded_subagent_sources_count"] != float64(1) {
+		t.Fatalf("excluded subagent count = %+v", item)
+	}
+}
+
+// TestSyncStatusUnsupportedHostIsKnownScope locks the no-scanner boundary: a
+// detected host without any local reader (Cursor / Windsurf / Cline) is
+// explicitly out of automatic coverage. It must not hold the supported scope at
+// "alignment unknown" forever; the harness item carries the capability flags and
+// the panel labels it as "no automatic turn scanner".
+func TestSyncStatusUnsupportedHostIsKnownScope(t *testing.T) {
+	env := newEnv(t)
+	home := os.Getenv("HOME")
+	if err := os.MkdirAll(filepath.Join(home, ".cursor"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The app bundle is the install evidence; the data directory alone is only
+	// a leftover workspace.
+	if err := os.MkdirAll(filepath.Join(home, "Applications", "Cursor.app"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	payload := runStatusJSON(t, filepath.Join(env.base, "cursor.db"))
+	item := harnessItem(t, payload, "cursor")
+	if item["detected"] != true || item["turns_scan_supported"] != false || item["sessions_scan_supported"] != false {
+		t.Fatalf("cursor item = %+v", item)
+	}
+	layer := payload["layers"].(map[string]any)["episodic"].(map[string]any)
+	if layer["alignment_known"] != true || layer["aligned"] != true {
+		t.Fatalf("unsupported host poisoned alignment: %+v", layer)
+	}
+	if payload["total_pending_sync"].(float64) != 0 {
+		t.Fatalf("unsupported host counted as pending: %+v", payload)
+	}
+}
+
+// TestSyncStatusOpenCodeInventoryHasNoTurnClaims locks the split capability for
+// OpenCode: sessions can be counted, but this build has no turn reader, so the
+// item must not claim turn coverage or fabricate a 0/0 pending count.
+func TestSyncStatusOpenCodeInventoryHasNoTurnClaims(t *testing.T) {
+	env := newEnv(t)
+	configDir := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "opencode")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(os.Getenv("XDG_DATA_HOME"), "opencode", "opencode.db")
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE session (id TEXT, time_archived INTEGER, time_updated INTEGER);
+		INSERT INTO session VALUES ('s1', 0, 1700000000000);`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	payload := runStatusJSON(t, filepath.Join(env.base, "opencode.db"))
+	item := harnessItem(t, payload, "opencode")
+	if item["sessions_scan_supported"] != true || item["turns_scan_supported"] != false || item["sessions_count"] != float64(1) {
+		t.Fatalf("opencode item = %+v", item)
+	}
+	if item["local_turns_count"] != float64(0) || item["unsynced_turns_count"] != float64(0) {
+		t.Fatalf("opencode fabricated turn counts: %+v", item)
+	}
+	layer := payload["layers"].(map[string]any)["episodic"].(map[string]any)
+	if layer["alignment_known"] != true || layer["aligned"] != true {
+		t.Fatalf("opencode inventory poisoned alignment: %+v", layer)
+	}
+}
+
+// TestSyncReconcileImportsDoubaoJSONLExport locks the documented Doubao path:
+// the app's live history stays behind its authenticated service, and a local
+// JSONL export in ~/Doubao/exports is a first-class harness transcript source.
+func TestSyncReconcileImportsDoubaoJSONLExport(t *testing.T) {
+	env := newEnv(t)
+	home := os.Getenv("HOME")
+	now := time.Now()
+	t.Setenv("ROLLING_MEMORY_SYNC_SINCE", now.Add(-time.Hour).Format(time.RFC3339))
+	export := filepath.Join(home, "Doubao", "exports", "conv-1.jsonl")
+	if err := os.MkdirAll(filepath.Dir(export), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ts := now.Add(-10 * time.Minute).Unix()
+	body := fmt.Sprintf(
+		`{"cwd":%q,"timestamp":%d,"type":"user","message":{"role":"user","content":"豆包导出的一轮对话"}}`+"\n"+
+			`{"cwd":%q,"timestamp":%d,"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":"豆包导出的回答"}}`+"\n",
+		filepath.Join(home, "Doubao"), ts, filepath.Join(home, "Doubao"), ts+1)
+	if err := os.WriteFile(export, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(env.base, "doubao-export.db")
+	st := runStatusJSON(t, dbPath)
+	item := harnessItem(t, st, "doubao")
+	if item["turns_scan_supported"] != true || item["sessions_count"] != float64(1) ||
+		item["local_turns_count"] != float64(2) || item["unsynced_turns_count"] != float64(2) {
+		t.Fatalf("doubao export status = %+v", item)
+	}
+	res := run(t, "sync", "reconcile", "--db", dbPath, "--harness", "doubao", "--layer", "episodic", "--json")
+	if res.code != 0 {
+		t.Fatalf("reconcile exit=%d stdout=%s stderr=%s", res.code, res.stdout, res.stderr)
+	}
+	rep := jsonObject(t, res.stdout)
+	if rep["episodic_imported_from_harness"] != float64(2) {
+		t.Fatalf("doubao export reconcile = %+v", rep)
+	}
+	after := harnessItem(t, runStatusJSON(t, dbPath), "doubao")
+	if after["synced_turns_count"] != float64(2) || after["unsynced_turns_count"] != float64(0) {
+		t.Fatalf("doubao export status after reconcile = %+v", after)
 	}
 }
 

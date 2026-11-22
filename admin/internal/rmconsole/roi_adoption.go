@@ -1572,7 +1572,7 @@ func loadVaultFollowupDocs(ctx context.Context, db *sql.DB, home, memoryPath str
 		SELECT doc_id, coalesce(occurred_at, 0), coalesce(locus, ''), coalesce(raw_text, ''), coalesce(sentences_json, '')
 		FROM rm_units
 		WHERE occurred_at >= ?
-		ORDER BY occurred_at ASC, rowid ASC
+		ORDER BY occurred_at ASC, doc_id ASC
 		LIMIT 400
 	`, minOccurredAt)
 	if err != nil {
@@ -1650,8 +1650,8 @@ func loadVaultFollowupDocs(ctx context.Context, db *sql.DB, home, memoryPath str
 			isTool:     isTool,
 		})
 	}
-	// 定稿顺序与 SQL 扫描顺序一致（occurred_at ASC, rowid ASC）：调用方依赖升序并在
-	// occurredAt > nextOcc 处 break，顺序不得随缓存命中位置漂移。
+	// 定稿顺序与 SQL 扫描顺序一致（occurred_at ASC, doc_id ASC；rm_units 是视图，没有
+	// rowid）：调用方依赖升序并在 occurredAt > nextOcc 处 break，顺序不得随缓存命中位置漂移。
 	return out, extraJSONLPaths
 }
 

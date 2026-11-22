@@ -24,6 +24,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rocareer/rolling-memory/internal/speech"
@@ -161,18 +162,56 @@ type zcodeTurnCacheKey struct {
 	msgCount     int64
 	maxSeq       int64
 	totalChanges int64
+	dataVersion  int64
+}
+
+// zcodeTurnCacheEntry keeps the longest segment prefix scanned for one turn
+// identity. complete marks a scan that reached the next user message; a partial
+// prefix is still reusable for callers that only ask for the leading segments.
+type zcodeTurnCacheEntry struct {
+	segments []Segment
+	complete bool
 }
 
 var (
 	zcodeTurnSegmentsCache sync.Map
 	zcodeTurnCacheCount    int
 	zcodeTurnCacheMu       sync.Mutex
+	zcodeTurnCacheHits     atomic.Int64
 )
 
 const maxZCodeTurnCacheEntries = 4096
 
-func storeZCodeTurnCache(key zcodeTurnCacheKey, val []Segment) {
+func zcodeTurnCacheHitCount() int64 { return zcodeTurnCacheHits.Load() }
+
+// loadZCodeTurnCache returns a copy of the cached prefix when it can satisfy the
+// caller: a complete entry serves any request, a partial entry only serves a
+// request whose minSegments it already covers.
+func loadZCodeTurnCache(key zcodeTurnCacheKey, minSegments int) ([]Segment, bool, bool) {
+	cached, ok := zcodeTurnSegmentsCache.Load(key)
+	if !ok {
+		return nil, false, false
+	}
+	entry := cached.(zcodeTurnCacheEntry)
+	if !entry.complete && (minSegments <= 0 || len(entry.segments) < minSegments) {
+		return nil, false, false
+	}
+	out := make([]Segment, len(entry.segments))
+	copy(out, entry.segments)
+	zcodeTurnCacheHits.Add(1)
+	return out, entry.complete, true
+}
+
+func storeZCodeTurnCache(key zcodeTurnCacheKey, val []Segment, complete bool) {
 	zcodeTurnCacheMu.Lock()
+	defer zcodeTurnCacheMu.Unlock()
+	if prev, ok := zcodeTurnSegmentsCache.Load(key); ok {
+		entry := prev.(zcodeTurnCacheEntry)
+		if entry.complete || len(entry.segments) >= len(val) {
+			return
+		}
+		zcodeTurnCacheCount--
+	}
 	if zcodeTurnCacheCount >= maxZCodeTurnCacheEntries {
 		zcodeTurnSegmentsCache.Range(func(k, _ any) bool {
 			zcodeTurnSegmentsCache.Delete(k)
@@ -181,8 +220,7 @@ func storeZCodeTurnCache(key zcodeTurnCacheKey, val []Segment) {
 		zcodeTurnCacheCount = 0
 	}
 	zcodeTurnCacheCount++
-	zcodeTurnCacheMu.Unlock()
-	zcodeTurnSegmentsCache.Store(key, val)
+	zcodeTurnSegmentsCache.Store(key, zcodeTurnCacheEntry{segments: val, complete: complete})
 }
 
 // ZCodeTurnSegments enumerates one turn, starting at userMsgID and stopping at the
@@ -203,9 +241,13 @@ func ZCodeTurnSegmentsUpTo(db *sql.DB, sessionID, userMsgID string, minSegments 
 		return nil, false, errors.New("episodic: zcode turn requires session and user message id")
 	}
 	var cacheKey zcodeTurnCacheKey
-	if minSegments <= 0 {
-		var msgCount, maxSeq, totalChg int64
+	{
+		var msgCount, maxSeq, totalChg, dataVersion int64
 		_ = db.QueryRow(`SELECT COUNT(*), COALESCE(MAX(sequence), 0), total_changes() FROM message WHERE session_id = ?`, sessionID).Scan(&msgCount, &maxSeq, &totalChg)
+		// A source edit can rewrite a part without changing message identity, so
+		// the key also carries the connection's data_version: another connection's
+		// commit invalidates the prefix instead of serving the pre-edit text.
+		_ = db.QueryRow(`PRAGMA data_version`).Scan(&dataVersion)
 		cacheKey = zcodeTurnCacheKey{
 			db:           db,
 			sessionID:    sessionID,
@@ -213,12 +255,10 @@ func ZCodeTurnSegmentsUpTo(db *sql.DB, sessionID, userMsgID string, minSegments 
 			msgCount:     msgCount,
 			maxSeq:       maxSeq,
 			totalChanges: totalChg,
+			dataVersion:  dataVersion,
 		}
-		if cached, ok := zcodeTurnSegmentsCache.Load(cacheKey); ok {
-			src := cached.([]Segment)
-			out := make([]Segment, len(src))
-			copy(out, src)
-			return out, true, nil
+		if cached, cachedComplete, ok := loadZCodeTurnCache(cacheKey, minSegments); ok {
+			return cached, cachedComplete, nil
 		}
 	}
 	var startSeq sql.NullInt64
@@ -340,11 +380,7 @@ func ZCodeTurnSegmentsUpTo(db *sql.DB, sessionID, userMsgID string, minSegments 
 			if len(segments) == 0 {
 				return nil, false, fmt.Errorf("episodic: empty zcode turn %s", userMsgID)
 			}
-			if minSegments <= 0 && complete {
-				cachedCopy := make([]Segment, len(segments))
-				copy(cachedCopy, segments)
-				storeZCodeTurnCache(cacheKey, cachedCopy)
-			}
+			cacheZCodeTurnSegments(cacheKey, segments, complete, minSegments)
 			return segments, complete, nil
 		}
 	}
@@ -465,12 +501,22 @@ func ZCodeTurnSegmentsUpTo(db *sql.DB, sessionID, userMsgID string, minSegments 
 	if len(segments) == 0 {
 		return nil, false, fmt.Errorf("episodic: empty zcode turn %s", userMsgID)
 	}
-	if minSegments <= 0 && complete {
-		cachedCopy := make([]Segment, len(segments))
-		copy(cachedCopy, segments)
-		storeZCodeTurnCache(cacheKey, cachedCopy)
+	if complete || minSegments > 0 {
+		cacheZCodeTurnSegments(cacheKey, segments, complete, minSegments)
 	}
 	return segments, complete, nil
+}
+
+// cacheZCodeTurnSegments stores the scanned prefix. Complete turns serve every
+// caller; early-stopped prefixes are reusable for later early-segment lookups.
+// The store keeps the longest prefix and never downgrades a complete entry.
+func cacheZCodeTurnSegments(key zcodeTurnCacheKey, segments []Segment, complete bool, minSegments int) {
+	if !complete && minSegments <= 0 {
+		return
+	}
+	cachedCopy := make([]Segment, len(segments))
+	copy(cachedCopy, segments)
+	storeZCodeTurnCache(key, cachedCopy, complete)
 }
 
 // JSONLTurn is one closed turn of a JSONL harness transcript.

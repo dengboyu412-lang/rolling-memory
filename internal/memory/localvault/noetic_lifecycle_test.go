@@ -4,6 +4,7 @@
 package localvault_test
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -295,6 +296,54 @@ func BenchmarkRecallNoeticCueVariants(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		if _, err := client.RecallNoetic("benchmark cue 250 alpha", 10); err != nil {
 			b.Fatalf("RecallNoetic: %v", err)
+		}
+	}
+}
+
+// TestNewVaultFastPathRestoresNoeticTraceColumns locks the upgrade path: a vault
+// that already stores its secret key takes the short open path, which must still
+// add the L3 lifecycle columns an older schema lacks.
+func TestNewVaultFastPathRestoresNoeticTraceColumns(t *testing.T) {
+	db, err := sql.Open("sqlite", vaultTestDSN(filepath.Join(t.TempDir(), "noetic-fast-path.db")))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := localvault.NewVault(db, []byte("fast-path-secret")); err != nil {
+		t.Fatalf("NewVault slow path: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO rm_meta(k, v) VALUES ('user_secret_key', ?)`, bytes.Repeat([]byte{7}, 32)); err != nil {
+		t.Fatalf("store key: %v", err)
+	}
+	if _, err := db.Exec(`DROP INDEX IF EXISTS idx_rm_noetic_trace`); err != nil {
+		t.Fatalf("drop trace index: %v", err)
+	}
+	for _, column := range []string{"query_variants_json", "trace_key", "superseded_by"} {
+		if _, err := db.Exec(`ALTER TABLE rm_noetic DROP COLUMN ` + column); err != nil {
+			t.Fatalf("drop %s: %v", column, err)
+		}
+	}
+	if _, err := localvault.NewVault(db, nil); err != nil {
+		t.Fatalf("NewVault fast path: %v", err)
+	}
+	rows, err := db.Query(`PRAGMA table_info(rm_noetic)`)
+	if err != nil {
+		t.Fatalf("table_info: %v", err)
+	}
+	defer rows.Close()
+	columns := map[string]bool{}
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, kind string
+		var dflt any
+		if err := rows.Scan(&cid, &name, &kind, &notNull, &dflt, &pk); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		columns[name] = true
+	}
+	for _, want := range []string{"query_variants_json", "trace_key", "superseded_by"} {
+		if !columns[want] {
+			t.Fatalf("fast path left rm_noetic without %s (columns=%v)", want, columns)
 		}
 	}
 }

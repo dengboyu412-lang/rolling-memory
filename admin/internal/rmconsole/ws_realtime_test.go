@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -127,6 +128,29 @@ func TestParseWSRoomSpec_ROIScopeAndHarness(t *testing.T) {
 	}
 }
 
+// TestWSRoomPermissionRulesUseCanonicalRuleNames 锁定 WebSocket 房间权限名与
+// admin_rules.name 同形：HTTP 侧由 BuildCheckPath 去掉 /admin 前缀，房间侧没有
+// 路径可剥，带前缀会让所有非超管角色被 403。
+func TestWSRoomPermissionRulesUseCanonicalRuleNames(t *testing.T) {
+	for _, kind := range []streamKind{
+		streamKindStatus, streamKindDashboard, streamKindEnvHealth, streamKindTerminal,
+		streamKindROI, streamKindEval, streamKindSystem, streamKindUpdate,
+	} {
+		rules, op := wsRoomPermissionRules(kind)
+		if len(rules) == 0 || op == "" {
+			t.Fatalf("kind %v has no permission rules", kind)
+		}
+		for _, rule := range rules {
+			if strings.HasPrefix(rule, "admin/") {
+				t.Fatalf("kind %v rule %q must not carry the /admin route prefix", kind, rule)
+			}
+			if !strings.HasPrefix(rule, "plugin/rolling-memory/") {
+				t.Fatalf("kind %v rule %q is not a rolling-memory admin rule", kind, rule)
+			}
+		}
+	}
+}
+
 func TestAuthorizeRMWSRoomAndToggleDeleteMemoryGuards(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -149,7 +173,7 @@ func TestAuthorizeRMWSRoomAndToggleDeleteMemoryGuards(t *testing.T) {
 	// 1) WebSocket RoomAuthorizer denies join when terminal permission is missing.
 	checkRMConsolePermission = func(_ context.Context, _ uint, ruleNames []string, _ string) (bool, error) {
 		for _, r := range ruleNames {
-			if r == "admin/plugin/rolling-memory/terminal" {
+			if r == "plugin/rolling-memory/terminal" {
 				return false, nil
 			}
 		}
