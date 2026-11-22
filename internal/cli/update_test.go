@@ -288,3 +288,10 @@ func TestConsoleReleaseMirrorFallbackPolicy(t *testing.T) {
 		t.Fatalf("explicit env must disable mirror fallback, got %q", got)
 	}
 }
+
+func TestResolveConsoleAssetBaseLeavesNonGiteeUnchanged(t *testing.T) {
+	base := "https://example.com/rolling-memory/releases/latest/download"
+	if got := resolveConsoleAssetBase(base); got != base {
+		t.Fatalf("resolveConsoleAssetBase(%q) = %q, want unchanged", base, got)
+	}
+}

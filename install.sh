@@ -85,6 +85,35 @@ rm_sha256() {
   fi
 }
 
+# resolve_gitee_release_base maps a Gitee "latest/download" base to the
+# tag-specific download base. Gitee does not expose GitHub's latest shortcut,
+# so the literal URL would 404 even when the release carries verified assets.
+resolve_gitee_release_base() {
+  local base="$1"
+  case "${base}" in
+    *gitee.com/*/releases/latest/download) ;;
+    *) printf '%s' "${base}"; return 0 ;;
+  esac
+  local rest="${base#*gitee.com/}"
+  local repo="${rest%%/releases/*}"
+  if [ -z "${repo}" ]; then printf '%s' "${base}"; return 0; fi
+  local tmp tag
+  tmp="$(mktemp "${TMPDIR:-/tmp}/rm-gitee.XXXXXX")" || { printf '%s' "${base}"; return 0; }
+  if rm_download "https://gitee.com/api/v5/repos/${repo}/releases/latest" "${tmp}" 2>/dev/null; then
+    tag="$(sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${tmp}" | head -1)"
+  fi
+  rm -f "${tmp}"
+  if [ -n "${tag}" ]; then
+    printf 'https://gitee.com/%s/releases/download/%s' "${repo}" "${tag}"
+  else
+    printf '%s' "${base}"
+  fi
+}
+
+if [ -z "${source_ref}" ] && [ -n "${release_base}" ]; then
+  release_base="$(resolve_gitee_release_base "${release_base}")"
+fi
+
 os_name="$(uname -s | tr '[:upper:]' '[:lower:]')"
 arch_name="$(uname -m | tr '[:upper:]' '[:lower:]')"
 case "${arch_name}" in

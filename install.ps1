@@ -45,6 +45,21 @@ if ($ReleaseMirror -in @("off", "none", "0")) {
     $ReleaseMirror = ""
 }
 
+function Resolve-GiteeReleaseBase([string]$Base) {
+    if ($Base -notmatch 'gitee\.com/([^/]+/[^/]+)/releases/latest/download') {
+        return $Base
+    }
+    $Repo = $Matches[1]
+    try {
+        $Latest = Invoke-RestMethod -Uri "https://gitee.com/api/v5/repos/$Repo/releases/latest" -TimeoutSec 20
+        if ($Latest.tag_name) {
+            return "https://gitee.com/$Repo/releases/download/$($Latest.tag_name)"
+        }
+    } catch {
+    }
+    return $Base
+}
+
 $InstallDir = if ($env:ROLLING_MEMORY_INSTALL_DIR) { $env:ROLLING_MEMORY_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA "rolling-memory\bin" }
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 $TargetBin = Join-Path $InstallDir "rolling-memory.exe"
@@ -63,7 +78,12 @@ for ($i = 0; $i -lt $args.Count; $i++) {
     }
 }
 if ($SourceRef -and $SourceRef.StartsWith("-")) { throw "install.ps1: invalid --ref value: $SourceRef" }
-if ($SourceRef) { $ReleaseBase = "" }
+if ($SourceRef) {
+    $ReleaseBase = ""
+} else {
+    if ($ReleaseBase) { $ReleaseBase = Resolve-GiteeReleaseBase $ReleaseBase }
+    if ($ReleaseMirror) { $ReleaseMirror = Resolve-GiteeReleaseBase $ReleaseMirror }
+}
 
 # Map the host architecture to the release asset suffix.
 $Arch = switch ($env:PROCESSOR_ARCHITECTURE) {

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.13] - 2026-11-22
+
+### Fixed
+
+- A fresh console installation from the Gitee source resolves the newest release tag before downloading the backend and web assets, instead of requesting Gitee's nonexistent `latest/download` path.
+- Both installers resolve Gitee's newest release tag, so an explicit Gitee mirror base installs the SHA-256 verified prebuilt binary instead of failing the prebuilt path.
+
 ## [0.0.12] - 2026-11-22
 
 ### Added
@@ -248,7 +255,8 @@ Initial public release.
 - **Client SDK (`sdk/`)**: a zero-dependency Go SDK (`v1.11.3`) for local memory encoding and integration, with complete third-party license notices.
 - **Licensing**: source-available under **PolyForm Noncommercial 1.0.0** — free to use, modify, and share for noncommercial purposes; commercial use or distribution requires a separate license.
 
-[Unreleased]: https://github.com/rocareer/rolling-memory/compare/v0.0.12...HEAD
+[Unreleased]: https://github.com/rocareer/rolling-memory/compare/v0.0.13...HEAD
+[0.0.13]: https://github.com/rocareer/rolling-memory/compare/v0.0.12...v0.0.13
 [0.0.12]: https://github.com/rocareer/rolling-memory/compare/v0.0.11...v0.0.12
 [0.0.11]: https://github.com/rocareer/rolling-memory/compare/v0.0.10...v0.0.11
 [0.0.10]: https://github.com/rocareer/rolling-memory/compare/v0.0.9...v0.0.10

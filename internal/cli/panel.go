@@ -6,6 +6,7 @@ package cli
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -23,6 +24,7 @@ import (
 	"time"
 
 	"github.com/rocareer/rolling-memory/internal/config"
+	"github.com/rocareer/rolling-memory/internal/updatecheck"
 	"github.com/rocareer/rolling-memory/internal/updatesource"
 )
 
@@ -75,6 +77,25 @@ func consoleReleaseBase() string {
 		return updatesource.ReleaseBase(cfg.Update.Source)
 	}
 	return updatesource.GitHubReleaseBase
+}
+
+// resolveConsoleAssetBase maps a mirror's "latest/download" base to the
+// tag-specific download base that actually serves assets. Gitee has no
+// GitHub-style latest shortcut, so a fresh `panel` install that only knows the
+// configured Gitee source would otherwise fetch a 404.
+func resolveConsoleAssetBase(base string) string {
+	if !updatesource.IsGiteeBase(base) {
+		return base
+	}
+	result, err := updatecheck.Check(context.Background(), updatecheck.Options{
+		ReleaseBase: base,
+		Channel:     updatecheck.ResolveChannel(""),
+		Timeout:     15 * time.Second,
+	})
+	if err == nil && strings.TrimSpace(result.AssetBase) != "" {
+		return result.AssetBase
+	}
+	return base
 }
 
 // consoleReleaseMirror returns the fallback release mirror when the caller did
@@ -554,7 +575,7 @@ func ensureConsoleBinary(root, binPath string, downloaded *[]string) (string, er
 	if built := buildConsoleFromSource(root, binPath); built != "" {
 		return built, nil
 	}
-	base := consoleReleaseBase()
+	base := resolveConsoleAssetBase(consoleReleaseBase())
 	if base == "" {
 		return "", fmt.Errorf("console binary not found at %s and the release channel is disabled", binPath)
 	}
@@ -806,7 +827,7 @@ func ensureConsoleWebDist(root, webDist string, downloaded *[]string) error {
 		}
 		return nil
 	}
-	base := consoleReleaseBase()
+	base := resolveConsoleAssetBase(consoleReleaseBase())
 	if base == "" {
 		return fmt.Errorf("console web assets not found at %s and the release channel is disabled", webDist)
 	}
@@ -894,7 +915,7 @@ func downloadAndExtractWebDist(base, root, webDist, wantSHA string) error {
 // binary or web assets, and stops running processes so they restart cleanly
 // with the updated artifacts.
 func updateConsoleAssetsIfChanged(layout panelLayout, downloaded *[]string) error {
-	base := consoleReleaseBase()
+	base := resolveConsoleAssetBase(consoleReleaseBase())
 	if base == "" {
 		return fmt.Errorf("release channel is disabled (ROLLING_MEMORY_RELEASE_BASE is off)")
 	}
