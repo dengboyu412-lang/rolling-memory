@@ -162,7 +162,8 @@ func TestWriteDefaultKeepsXDGResolvedPaths(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read config: %v", err)
 	}
-	if !strings.Contains(string(raw), before.DB) {
-		t.Fatalf("config file does not record the XDG database path %q:\n%s", before.DB, raw)
+	if !strings.Contains(string(raw), tomlBasicString(before.DB)) {
+		t.Fatalf("config file does not record the XDG database path %q (TOML form %q):\n%s",
+			before.DB, tomlBasicString(before.DB), raw)
 	}
 }

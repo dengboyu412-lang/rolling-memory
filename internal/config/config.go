@@ -826,14 +826,26 @@ func applyXDGPathDefaults(text string) string {
 	if os.Getenv("XDG_DATA_HOME") != "" {
 		text = strings.Replace(text,
 			`db = "~/.local/share/rolling-memory/memory.db"`,
-			`db = "`+DefaultDBPath()+`"`, 1)
+			`db = "`+tomlBasicString(DefaultDBPath())+`"`, 1)
 	}
 	if os.Getenv("XDG_STATE_HOME") != "" {
 		text = strings.Replace(text,
 			`log = "~/.local/state/rolling-memory/rolling-memory.log"`,
-			`log = "`+filepath.Join(DefaultStateDir(), "rolling-memory.log")+`"`, 1)
+			`log = "`+tomlBasicString(filepath.Join(DefaultStateDir(), "rolling-memory.log"))+`"`, 1)
 	}
 	return text
+}
+
+// tomlBasicString escapes s so it can be interpolated into a TOML basic
+// (double-quoted) string on any platform. Windows defaults embed backslashes,
+// and a literal `\U`/`\u` sequence in a basic string is parsed as a unicode
+// escape — `db = "C:\Users\..."` fails to load with "invalid hexadecimal digit
+// in unicode escape sequence", leaving WriteDefault having produced a config
+// the tool then cannot read back.
+func tomlBasicString(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	return s
 }
 
 // PortableDefaultConfigText returns DefaultConfigText adapted for a portable USB
