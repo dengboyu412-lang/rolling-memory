@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_No unreleased changes yet._
+
+## [0.0.11] - 2026-11-22
+
+### Added
+
+- A public **Architecture & Performance** page describes the three memory layers, immutable published generations, asynchronous visibility, and measured local recall latency under an ingest backlog. The English page and its Simplified Chinese mirror are linked from the documentation hub.
+
+### Changed
+
+- Recall now serves only the active published generation: a write becomes searchable when the background builder publishes the next generation, not while the write is in flight. On the 5,000-unit ATM corpus, warmed queries stay at p50 11–15 ms and p99 23–25 ms with 0, 200, 2,000 or 5,000 unpublished writes, and only the first query of a new generation pays a one-time open.
+- The background builder reuses the previous published generation and applies the change log instead of rebuilding the whole corpus from storage. It now publishes on a fixed 60-second cadence by default (`daemon.snapshot_interval`, `10s–1h`, also `ROLLING_MEMORY_SNAPSHOT_INTERVAL`), so a batch is whatever arrived in that window; reference batches of 64–128 writes publish in about 0.5–3.7 s at 2,000–10,522 units, versus 1.6–14.1 s for a full rebuild. The first generation is still built immediately.
+- A write is durable immediately and becomes searchable at the next publish. Daily harness work rarely needs immediate visibility — the current turn is already in the model's context — so the default cadence trades a short delay for stable recall during long sessions and large imports.
+- The README now leads with the independent **AML Cycle 2** code-track result: the Noisy new-feature resolution rate is **80.39%** (No. 1 on the closed-source methods board, published 2026-11-19), shown together with the same track's overall Noisy reading (62.00%, tied 3rd), combined ranking (5th), and bug-fix reading (52.53%). The Live Console screenshot moves below the product summary so the official leaderboard card is the first image.
+
+### Fixed
+
+- `install.ps1` now enables TLS 1.2 and disables the `Invoke-WebRequest` progress bar before any download, and is stored as UTF-8 with a BOM so Windows PowerShell 5.1 reads its non-ASCII diagnostics correctly. Previously, unpatched Windows hosts could fail the GitHub handshake, large downloads crawled behind the progress bar, and every non-ASCII message was garbled. (Reported and suggested by @Buyou27 in #2; adopted and rewritten in the source tree.)
+
 ## [0.0.10] - 2026-11-21
 
 ### Changed
@@ -203,7 +222,8 @@ Initial public release.
 - **Client SDK (`sdk/`)**: a zero-dependency Go SDK (`v1.11.3`) for local memory encoding and integration, with complete third-party license notices.
 - **Licensing**: source-available under **PolyForm Noncommercial 1.0.0** — free to use, modify, and share for noncommercial purposes; commercial use or distribution requires a separate license.
 
-[Unreleased]: https://github.com/rocareer/rolling-memory/compare/v0.0.10...HEAD
+[Unreleased]: https://github.com/rocareer/rolling-memory/compare/v0.0.11...HEAD
+[0.0.11]: https://github.com/rocareer/rolling-memory/compare/v0.0.10...v0.0.11
 [0.0.10]: https://github.com/rocareer/rolling-memory/compare/v0.0.9...v0.0.10
 [0.0.9]: https://github.com/rocareer/rolling-memory/compare/v0.0.8...v0.0.9
 [0.0.8]: https://github.com/rocareer/rolling-memory/compare/v0.0.7...v0.0.8

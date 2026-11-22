@@ -19,12 +19,8 @@ import (
 )
 
 const (
-	// snapshotBuildGapThreshold is the number of corpus writes tolerated on top
-	// of the published cluster before a rebuild is requested. It stays well below
-	// maxCSRDeltaDocs so the reader never reaches the delta cliff.
-	snapshotBuildGapThreshold = 512
-	// snapshotBuildRetryAfter throttles a failing builder; the guard is a floor,
-	// not a schedule.
+	// snapshotBuildRetryAfter is the failure backoff. A healthy builder follows
+	// the configured cadence instead.
 	snapshotBuildRetryAfter = 2 * time.Minute
 	// snapshotBuildMaxFailures stops the restart loop after a persistent fault
 	// (disk full, corrupt vault); the status row keeps the reason.
@@ -32,9 +28,30 @@ const (
 	snapshotBuildStatusKey   = "snapshot_build_status"
 )
 
+// snapshotBuildDue reports whether the background builder should run. A missing
+// or stale generation is built immediately; otherwise the builder waits for the
+// configured cadence. Failures use the retry floor instead of the cadence.
+func snapshotBuildDue(now time.Time, lastNS int64, failures int32, interval time.Duration, ready, known bool, gap int64) bool {
+	if ready && known && gap <= 0 {
+		return false
+	}
+	if lastNS == 0 {
+		return true
+	}
+	wait := interval
+	if wait <= 0 {
+		wait = config.DefaultSnapshotInterval
+	}
+	if failures > 0 {
+		wait = snapshotBuildRetryAfter
+	}
+	return now.Sub(time.Unix(0, lastNS)) >= wait
+}
+
 // ensureSnapshotBuilder makes sure a read-only recall surface has a durable
-// disk cluster and schedules the background builder when it is missing or the
-// delta grew past the threshold. The builder is a separate process, so its
+// disk cluster and schedules the background builder. The builder publishes on a
+// fixed cadence (default 60s) and only when changes are pending; the first
+// generation is built immediately. The builder is a separate process, so its
 // memory and CPU never enter the recall runtime.
 func (a *application) ensureSnapshotBuilder(ctx context.Context, memory *facade.Memory) {
 	if a == nil || memory == nil || memory.Config == nil || !memory.SnapshotOnly() {
@@ -63,11 +80,8 @@ func (a *application) ensureSnapshotBuilder(ctx context.Context, memory *facade.
 	if !known {
 		gap, known = memory.SnapshotBuildGap(ctx)
 	}
-	if ready && known && gap < snapshotBuildGapThreshold {
-		return
-	}
-	now := time.Now().UnixNano()
-	if last := a.snapshotBuildLastNS.Load(); last != 0 && now-last < int64(snapshotBuildRetryAfter) {
+	if !snapshotBuildDue(time.Now(), a.snapshotBuildLastNS.Load(), a.snapshotBuildFailures.Load(),
+		memory.Config.Daemon.EffectiveSnapshotInterval(), ready, known, gap) {
 		return
 	}
 	if !a.snapshotBuildRunning.CompareAndSwap(false, true) {

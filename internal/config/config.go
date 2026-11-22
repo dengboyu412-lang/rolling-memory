@@ -27,12 +27,25 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/pelletier/go-toml/v2"
 	"github.com/rocareer/rolling-memory/internal/ids"
 	"github.com/rocareer/rolling-memory/internal/updatechannel"
 	"github.com/rocareer/rolling-memory/internal/updatesource"
+)
+
+const (
+	// DefaultSnapshotInterval is the default cadence of the background
+	// published generation. Daily harness work rarely needs immediate
+	// visibility: the current turn is usually still in the model's context, so
+	// memory is for older material.
+	DefaultSnapshotInterval = 60 * time.Second
+	// SnapshotIntervalFloor keeps a misconfigured interval from turning the
+	// builder into a continuous process; the ceiling bounds staleness.
+	SnapshotIntervalFloor   = 10 * time.Second
+	SnapshotIntervalCeiling = time.Hour
 )
 
 const (
@@ -92,6 +105,11 @@ source = "github"
 # off  = no explicit cap (a GOMEMLIMIT environment value still applies).
 # Explicit sizes accept B / KiB / MiB / GiB / TiB, e.g. "512MiB" or "2GiB".
 memory_limit = "auto"
+# Fixed cadence of the background published generation. Daily harness work
+# usually does not need immediate visibility: the current turn is already in the
+# model's context, so a short publish delay is a deliberate trade for stable
+# recall. Accepts Go durations ("60s", "5m") or plain seconds ("60").
+snapshot_interval = "60s"
 
 [recall]
 chars = 16000
@@ -227,6 +245,39 @@ type DaemonConfig struct {
 	// MemoryLimit is the canonical soft memory limit: "auto", "off" or a
 	// size such as "2GiB". It is applied when the daemon starts.
 	MemoryLimit string
+	// SnapshotInterval is the fixed cadence of the background published
+	// generation. Zero falls back to DefaultSnapshotInterval for configs built
+	// outside Load.
+	SnapshotInterval time.Duration
+}
+
+// EffectiveSnapshotInterval returns the configured cadence or the default.
+func (d DaemonConfig) EffectiveSnapshotInterval() time.Duration {
+	if d.SnapshotInterval <= 0 {
+		return DefaultSnapshotInterval
+	}
+	return d.SnapshotInterval
+}
+
+// ParseSnapshotInterval accepts a Go duration ("60s", "5m") or a plain integer
+// number of seconds, and enforces the operational bounds.
+func ParseSnapshotInterval(raw string) (time.Duration, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return DefaultSnapshotInterval, true
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		seconds, aerr := strconv.Atoi(raw)
+		if aerr != nil {
+			return 0, false
+		}
+		d = time.Duration(seconds) * time.Second
+	}
+	if d < SnapshotIntervalFloor || d > SnapshotIntervalCeiling {
+		return 0, false
+	}
+	return d, true
 }
 
 // Config is the resolved runtime configuration.
@@ -359,6 +410,13 @@ func Load(opts LoadOptions) (*Config, error) {
 		// silently falling back to auto.
 		daemonMemoryLimit = strings.TrimSpace(daemonMemoryLimitRaw)
 	}
+	snapshotIntervalRaw := pyString(envOr(env, "ROLLING_MEMORY_SNAPSHOT_INTERVAL",
+		getDefault(daemonTable, "snapshot_interval", DefaultSnapshotInterval.String())))
+	snapshotInterval, snapshotIntervalOK := ParseSnapshotInterval(snapshotIntervalRaw)
+	if !snapshotIntervalOK {
+		return nil, newConfigError("daemon.snapshot_interval must be a duration between %s and %s (e.g. '60s', '5m'), got %s",
+			SnapshotIntervalFloor, SnapshotIntervalCeiling, pyRepr(snapshotIntervalRaw))
+	}
 
 	resolvedDB := resolveConfigPath(pyString(dbValue), portableRoot, DefaultDBPath(), "~/.local/share/rolling-memory/memory.db")
 	resolvedLog := resolveConfigPath(pyString(logValue), portableRoot, filepath.Join(DefaultStateDir(), "rolling-memory.log"), "~/.local/state/rolling-memory/rolling-memory.log")
@@ -377,7 +435,7 @@ func Load(opts LoadOptions) (*Config, error) {
 		Recall:           recallConfig,
 		Hooks:            hooksConfig,
 		Storage:          StorageConfig{Profile: storageProfile},
-		Daemon:           DaemonConfig{MemoryLimit: daemonMemoryLimit},
+		Daemon:           DaemonConfig{MemoryLimit: daemonMemoryLimit, SnapshotInterval: snapshotInterval},
 		Eval:             evalConfig,
 		Update:           UpdateConfig{Channel: updateChannel, Source: updateSource},
 	}
@@ -410,6 +468,11 @@ func (c *Config) Validate() error {
 	if _, _, ok := ParseMemoryLimit(c.Daemon.MemoryLimit); !ok {
 		return newConfigError("daemon.memory_limit must be 'auto', 'off' or a size between %s and %s (e.g. '512MiB', '2GiB'), got %s",
 			formatMemorySize(ExplicitMemoryLimitFloor), formatMemorySize(ExplicitMemoryLimitCeiling), pyRepr(c.Daemon.MemoryLimit))
+	}
+	if c.Daemon.SnapshotInterval != 0 &&
+		(c.Daemon.SnapshotInterval < SnapshotIntervalFloor || c.Daemon.SnapshotInterval > SnapshotIntervalCeiling) {
+		return newConfigError("daemon.snapshot_interval must be between %s and %s, got %s",
+			SnapshotIntervalFloor, SnapshotIntervalCeiling, c.Daemon.SnapshotInterval)
 	}
 	for _, value := range []int{
 		c.Recall.Chars,
@@ -596,7 +659,8 @@ func (c *Config) PublicDict() map[string]any {
 			"budget_ms": c.Recall.BudgetMS,
 		},
 		"daemon": map[string]any{
-			"memory_limit": c.Daemon.MemoryLimit,
+			"memory_limit":      c.Daemon.MemoryLimit,
+			"snapshot_interval": c.Daemon.EffectiveSnapshotInterval().String(),
 		},
 		"update": map[string]any{
 			"channel": c.Update.Channel,

@@ -20,6 +20,7 @@ const (
 	snapshotSlotGen        = "snap.gen"
 	snapshotSlotUnits      = "snap.units"
 	snapshotSlotDocs       = "snap.docs"
+	snapshotSlotAgg        = "snap.agg"
 	snapshotPointerPrefix  = "v1 "
 )
 

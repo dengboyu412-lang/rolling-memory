@@ -5,6 +5,7 @@ package core
 
 import (
 	"math"
+	"slices"
 	"sort"
 )
 
@@ -408,6 +409,17 @@ func (e *Engine) buildIndexWithDeltaDrop(delta []Doc, drop map[string]struct{}) 
 	if e.HasDelta() {
 		return nil
 	}
+	// 追加式快速路径：新单元 ID 全部排在既有单元之后且无删除时，单元下标不变，
+	// 可整段共享旧索引的逐单元映射，只按词追加倒排；与全量重建逐位一致。
+	if drop == nil && uniqueDeltaIDs(delta) && appendAtEndApplicable(e.Index, delta) {
+		return buildIndexAppendAtEnd(e.Index, delta)
+	}
+	// 惰性物化：基座缺位或落后于当前索引时，直接以当前索引为源重建，
+	// 避免为一次写入触发整个簇状态的全库物化。
+	base := e.baseClusterState()
+	if indexFromIndexApplicable(e.Index) && (base == nil || len(base.docRowPtr) != e.Index.N+1) {
+		return buildIndexFromIndex(e.Index, delta, drop)
+	}
 	st := e.ensureClusterState()
 	if st == nil || len(st.docRowPtr) != e.Index.N+1 {
 		return nil
@@ -565,6 +577,23 @@ type docTermMass struct {
 	mass float64
 }
 
+// docTermMassCompare orders by mass descending then hash ascending.
+func docTermMassCompare(a, b docTermMass) int {
+	if a.mass != b.mass {
+		if a.mass > b.mass {
+			return -1
+		}
+		return 1
+	}
+	if a.h < b.h {
+		return -1
+	}
+	if a.h > b.h {
+		return 1
+	}
+	return 0
+}
+
 type docTermMassSort []docTermMass
 
 func (s docTermMassSort) Len() int { return len(s) }
@@ -619,7 +648,7 @@ func (idx *Index) finalizeMasses() {
 		for i, h := range atoms {
 			docTermScratch[i] = docTermMass{h: h, mass: idx.Mass[h]}
 		}
-		sort.Sort(docTermMassSort(docTermScratch))
+		slices.SortFunc(docTermScratch, docTermMassCompare)
 		for i := range docTermScratch {
 			atoms[i] = docTermScratch[i].h
 			idx.DocMass[unit] += docTermScratch[i].mass

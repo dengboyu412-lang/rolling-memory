@@ -72,6 +72,9 @@ func TestApplyDocsMatchesSequentialAndFullRebuild(t *testing.T) {
 		t.Fatalf("ApplyDocs removed %d, want 2 resident IDs", removed)
 	}
 
+	if got := ComputeCorpusDigest(seq.Index); got != wantCorpus {
+		t.Fatalf("sequential corpus digest mismatch: full=%x seq=%x", wantCorpus, got)
+	}
 	if got := clusterStateCanonicalDigest(seq.ensureClusterState()); got != wantDigest {
 		t.Fatalf("sequential cluster digest mismatch:\n full=%s\n seq =%s", wantDigest, got)
 	}

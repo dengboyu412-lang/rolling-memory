@@ -117,6 +117,9 @@ type Engine struct {
 	TimeKernel bool
 	// ClusterPipeline 默认开启四步簇与短语流水线（EntityCluster × SpacetimeCluster × PhraseDyad）。
 	ClusterPipeline bool
+	// ForceFullClusterRebuild 强制下一次重建丢弃增量基座、从新索引整建簇状态。
+	// 代发布克隆用它避免把共享的旧簇状态（含族聚合）就地扣减。
+	ForceFullClusterRebuild bool
 
 	EnableStage3Plugin bool
 	Stage3Plugin       Stage3Plugin
@@ -127,9 +130,17 @@ type Engine struct {
 	prevClusterState *rmClusterState
 	// prevDrops 是本次重建中被移除或覆盖的旧单元 ID（删除 + 同 ID 覆盖），
 	// 增量路径需要据此从族统计量中扣减旧贡献。
-	prevDrops    map[string]struct{}
+	prevDrops map[string]struct{}
+	// pendingBase/pendingDrops 是尚未物化的增量基座与待扣减集：写路径只更新索引并
+	// 累积扣减，簇状态物化推迟到下一次读或后台发布时一次结算（读时物化仍按 Δ 扩展）。
+	pendingBase  *rmClusterState
+	pendingDrops map[string]struct{}
 	queryScratch *rmQueryScratch
 	mmapUnmap    func() error
+	// retainBuildBase keeps a published mmap segment mapped across an in-place
+	// write, so the pending incremental basis can extend it instead of being
+	// discarded. Only a builder that reopens a generation sets it.
+	retainBuildBase bool
 
 	// 零拷贝增量叠加层（Delta Overlay）：在保持底层只读索引/.zcsr 映射区不卸载、不触发
 	// 全量反解与全量重建的前提下，承载小批量新增/更新文档（deltaEngine）与已删除/已覆写
@@ -138,6 +149,33 @@ type Engine struct {
 	deltaMasked map[string]struct{}
 	deltaDocs   map[string]Doc
 	deltaOrder  []string
+}
+
+// RetainBuildBase makes in-place writes keep the published mmap base mapped
+// until the next cluster materialisation, so a reopened generation can be
+// extended incrementally. A normal reader/writer path leaves it false: closing
+// the segment is what frees a generation it no longer owns.
+func (e *Engine) RetainBuildBase(keep bool) {
+	if e == nil {
+		return
+	}
+	e.retainBuildBase = keep
+}
+
+// stageRebuild stages the pre-rebuild cluster state for incremental extension.
+// A published mmap base must be staged before the segment is unmapped; when the
+// caller did not ask to retain it, the segment is closed first and no basis is
+// kept, because the staged slices would outlive their mapping.
+func (e *Engine) stageRebuild(drops map[string]struct{}, n int) {
+	if e == nil {
+		return
+	}
+	if e.mmapUnmap != nil && !e.retainBuildBase {
+		_ = e.Close()
+		e.stageIncrementalBasis(drops, n)
+		return
+	}
+	e.stageIncrementalBasis(drops, n)
 }
 
 // Close 释放引擎挂载的任何底层 mmap 磁盘段资源，并在卸载映射前将 Index 上仍指向映射区的
@@ -191,6 +229,62 @@ func (e *Engine) ResetScratch() {
 		return
 	}
 	e.queryScratch = nil
+}
+
+// CloneForQuery 返回查询专用的浅拷贝：共享只读 Index / 簇状态，独占 queryScratch，
+// 且不持有 mmap 卸载句柄（查询不得关闭底层段）。调用方不得在其上执行写操作。
+func (e *Engine) CloneForQuery() *Engine {
+	if e == nil {
+		return nil
+	}
+	c := *e
+	c.queryScratch = nil
+	c.mmapUnmap = nil
+	c.retainBuildBase = false
+	return &c
+}
+
+// HasMmapSegment 报告引擎是否挂载着需要显式关闭的 mmap 段。mmap 基座不做后台换代：
+// 旧段仍服务在途读者，增量由同步排空处理。
+func (e *Engine) HasMmapSegment() bool {
+	return e != nil && e.mmapUnmap != nil
+}
+
+// CloneForPublish 返回代发布专用的浅拷贝：共享只读 Index / 簇状态作为基座，
+// 独占增量字段并强制整建簇状态，避免就地扣减共享的旧族聚合。
+// mmap 承载的引擎返回 nil（旧段仍需服务在途读者，交由同步路径处理）。
+func (e *Engine) CloneForPublish() *Engine {
+	if e == nil || e.mmapUnmap != nil {
+		return nil
+	}
+	c := *e
+	c.queryScratch = nil
+	c.prevClusterState = nil
+	c.prevDrops = nil
+	c.deltaEngine = nil
+	c.deltaMasked = nil
+	c.deltaDocs = nil
+	c.deltaOrder = nil
+	c.Stage3Plugin = nil
+	c.EnableStage3Plugin = false
+	c.ForceFullClusterRebuild = false
+	c.clusterState = e.clusterState.CloneForPublish()
+	c.pendingBase = nil
+	c.pendingDrops = nil
+	c.retainBuildBase = false
+	// 写路径惰性化后，已物化状态可能缺位：把挂起的基座深拷贝给发布克隆，
+	// 使发布仍走增量扩展而不是从零整建。
+	if c.clusterState == nil && e.pendingBase != nil {
+		c.pendingBase = e.pendingBase.CloneForPublish()
+		if len(e.pendingDrops) > 0 {
+			c.pendingDrops = make(map[string]struct{}, len(e.pendingDrops))
+			for id := range e.pendingDrops {
+				c.pendingDrops[id] = struct{}{}
+			}
+		}
+	}
+	c.mmapUnmap = nil
+	return &c
 }
 
 // MaterializeClusterState eagerly builds the flat CSR cluster state and binds
@@ -521,16 +615,44 @@ func (e *Engine) exportBaseDocs() []Doc {
 	return docs
 }
 
-// stageIncrementalBasis 记录本次重建的增量基座与待扣减 ID 集（删除 + 同 ID 覆盖）；
-// 旧状态缺统计量、存在 overlay 或空库时清空基座，由 ensureClusterState 走全量重建。
+// stageIncrementalBasis 累积本次重建的增量基座与待扣减 ID 集（删除 + 同 ID 覆盖）。
+// 连续写入共享同一基座：基座取当前已物化状态，缺位时沿用上一次挂起的基座。
+// 旧状态缺统计量、存在 overlay 或空库时清空，由 ensureClusterState 走全量重建。
 func (e *Engine) stageIncrementalBasis(drops map[string]struct{}, n int) {
-	if e.ClusterPipeline && e.clusterState != nil && e.clusterState.agg != nil && !e.HasDelta() && n > 0 {
-		e.prevClusterState = e.clusterState
-		e.prevDrops = drops
+	if e.ForceFullClusterRebuild || !e.ClusterPipeline || e.HasDelta() || n <= 0 {
+		e.pendingBase = nil
+		e.pendingDrops = nil
 		return
 	}
-	e.prevClusterState = nil
-	e.prevDrops = nil
+	base := e.clusterState
+	if base == nil {
+		base = e.pendingBase
+	}
+	if base == nil || base.agg == nil {
+		e.pendingBase = nil
+		e.pendingDrops = nil
+		return
+	}
+	e.pendingBase = base
+	if len(drops) > 0 {
+		if e.pendingDrops == nil {
+			e.pendingDrops = make(map[string]struct{}, len(drops))
+		}
+		for id := range drops {
+			e.pendingDrops[id] = struct{}{}
+		}
+	}
+}
+
+// baseClusterState 返回可用于增量基座或索引重建的最近簇状态（已物化优先，其次挂起基座）。
+func (e *Engine) baseClusterState() *rmClusterState {
+	if e == nil {
+		return nil
+	}
+	if e.clusterState != nil {
+		return e.clusterState
+	}
+	return e.pendingBase
 }
 
 // AppendDocs 将新增或更新的文档批次流式并入当前 Engine（支持内存态与 .zcsr mmap 零拷贝态热升迁），
@@ -550,10 +672,8 @@ func (e *Engine) AppendDocs(docs []Doc) {
 		combined = append(combined, docs...)
 		rebuilt = BuildIndex(combined)
 	}
-	if e.mmapUnmap != nil {
-		_ = e.Close()
-	}
-	// 增量基座：同 ID 覆盖记入 prevDrops（扣减旧贡献）。
+	// 增量基座：同 ID 覆盖记入 prevDrops（扣减旧贡献）。必须在释放/保留基座
+	// 之前判定，才能在保留 mmap 基座时看到旧族聚合。
 	var replaced map[string]struct{}
 	if e.ClusterPipeline && e.clusterState != nil && e.clusterState.agg != nil && !e.HasDelta() && e.Index != nil {
 		for _, doc := range docs {
@@ -568,14 +688,11 @@ func (e *Engine) AppendDocs(docs []Doc) {
 			}
 		}
 	}
-	e.stageIncrementalBasis(replaced, rebuilt.N)
+	e.stageRebuild(replaced, rebuilt.N)
 	e.Index = rebuilt
 	e.clusterState = nil
 	e.queryScratch = nil
 	e.ClearDelta()
-	if e.ClusterPipeline {
-		_ = e.ensureClusterState()
-	}
 	e.syncStage3Plugin()
 }
 
@@ -658,17 +775,11 @@ func (e *Engine) DeleteDocs(unitIDs ...string) int {
 		}
 		rebuilt = BuildIndex(kept)
 	}
-	if e.mmapUnmap != nil {
-		_ = e.Close()
-	}
-	e.stageIncrementalBasis(drops, rebuilt.N)
+	e.stageRebuild(drops, rebuilt.N)
 	e.Index = rebuilt
 	e.clusterState = nil
 	e.queryScratch = nil
 	e.ClearDelta()
-	if e.ClusterPipeline && rebuilt.N > 0 {
-		_ = e.ensureClusterState()
-	}
 	e.syncStage3Plugin()
 	return removed
 }
@@ -746,17 +857,11 @@ func (e *Engine) ApplyDocs(unitIDs []string, upserts []Doc) int {
 		kept = append(kept, upserts...)
 		rebuilt = BuildIndex(kept)
 	}
-	if e.mmapUnmap != nil {
-		_ = e.Close()
-	}
-	e.stageIncrementalBasis(drops, rebuilt.N)
+	e.stageRebuild(drops, rebuilt.N)
 	e.Index = rebuilt
 	e.clusterState = nil
 	e.queryScratch = nil
 	e.ClearDelta()
-	if e.ClusterPipeline && rebuilt.N > 0 {
-		_ = e.ensureClusterState()
-	}
 	e.syncStage3Plugin()
 	return removed
 }

@@ -50,11 +50,12 @@ rmem config set <section.key> <value>
 
 The delivery window is also switchable from the console header of the overview page.
 
-### 2.3 Background engine memory cap — `[daemon]`
+### 2.3 Background engine — `[daemon]`
 
 | Key | Default | Meaning |
 |---|---|---|
 | `daemon.memory_limit` | `auto` | Soft heap limit for the background engine daemon |
+| `daemon.snapshot_interval` | `60s` | Fixed cadence of the background published generation (`10s–1h`) |
 
 Accepted values:
 
@@ -68,6 +69,8 @@ Accepted values:
 - `rmem daemon status --json` reports the effective cap and where it came from (`auto` / `explicit` / `env` / `off` / `unavailable`).
 - If the `GOMEMLIMIT` environment variable is set, it wins over the configuration file (standard Go runtime semantics).
 - If the physical-memory probe fails, no cap is applied — the daemon keeps the runtime default rather than guessing.
+
+**Published-generation cadence.** The background builder publishes pending changes on a fixed cadence (default 60 seconds). A write is durable immediately but becomes searchable after the next publish. Daily harness work rarely needs immediate visibility: the current turn — the file just read, the command just run, the message just exchanged — is already in the model's context, and memory retrieval is for older material that fell out of context. A short publish delay is therefore a deliberate trade for stable recall during long sessions and large imports. Set `snapshot_interval = "30s"` for faster visibility, or a larger value such as `"5m"` to reduce background work. The first generation is built immediately; a failed build retries after a two-minute backoff. The value accepts Go durations (`60s`, `5m`) or plain seconds (`60`).
 
 ### 2.4 Storage profile — `[storage]`
 
@@ -103,6 +106,7 @@ Every `config.toml` key has an environment counterpart that wins over the file; 
 | `ROLLING_MEMORY_UPDATE_CHANNEL` | `update.channel` |
 | `ROLLING_MEMORY_UPDATE_SOURCE` | `update.source` |
 | `ROLLING_MEMORY_DAEMON_MEMORY_LIMIT` | `daemon.memory_limit` |
+| `ROLLING_MEMORY_SNAPSHOT_INTERVAL` | `daemon.snapshot_interval` |
 | `ROLLING_MEMORY_DAEMON_SOCKET` | Engine socket path |
 | `ROLLING_MEMORY_PORTABLE` | Force portable mode with an explicit payload root |
 | `GOMEMLIMIT` | Go runtime soft memory limit (wins over `daemon.memory_limit` when set) |

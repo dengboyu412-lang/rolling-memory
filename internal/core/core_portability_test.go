@@ -34,6 +34,8 @@ func TestPortableCoreTypechecksWithoutAdapters(t *testing.T) {
 		"calendar_occupancy.go",
 		"cluster_state_aggregates.go",
 		"index.go",
+		"index_append_fast.go",
+		"index_from_index.go",
 		"pipeline.go",
 		"pipeline_state.go",
 		"pipeline_cluster.go",
@@ -53,7 +55,7 @@ func TestPortableCoreTypechecksWithoutAdapters(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if path != "math" && path != "sort" {
+			if path != "math" && path != "sort" && path != "slices" {
 				t.Fatalf("portable core %s imports %q", name, path)
 			}
 		}

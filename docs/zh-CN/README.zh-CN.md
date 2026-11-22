@@ -1,12 +1,14 @@
 # Rolling-Memory
 
-**[简体中文](README.zh-CN.md) · [English](../../README.md) · [官方网站](https://rolling-memory.rocareer.com/) · [文档中心](README.md) · [省 Token 算账与边界](token-economics.md) · [常见问答](faq.md) · [评测与复现](benchmarks.md) · [立场与免责声明](DECLARATION.md)**
+**[简体中文](README.zh-CN.md) · [English](../../README.md) · [官方网站](https://rolling-memory.rocareer.com/) · [AML 官方榜单](https://agentmemories.ai/leaderboard/) · [文档中心](README.md) · [省 Token 算账与边界](token-economics.md) · [常见问答](faq.md) · [评测与复现](benchmarks.md) · [贡献者](../../CONTRIBUTORS.md) · [立场与免责声明](DECLARATION.md)**
 
 **Rolling Memory**（中文品牌「洛灵」）是一个源码公开、本地优先的记忆工具，面向 AI 编程助手与 Agent——Claude Code、Codex、OpenCode、Cursor、Windsurf、Cline、ZCode 等——由 **Rolling Autonoetic Memory Engine（洛灵自知记忆引擎）** 驱动。它在本地索引受支持的对话来源与挂载文件，经唯一 MCP 工具 `recall`（回忆）提供给接入的编程助手；对话采集范围和手工导入方式见[接入指南](harness.md#45-对话采集范围与手工导入)。**无需云端、无向量、无后台大模型调用**；非商业用途免费。
 
-![Rolling Memory Live Console — 本地金库遥测、MCP recall 账本与记忆资产增长](../assets/live-console-zh.webp)
+**独立第三方评测成绩**：在 **Agent Memory Leaderboard（AML，记忆之巅）第二期**的代码赛道闭源方法榜中，Rolling Memory 的「Noisy 新功能」代码子能力以 **80.39% 解决率位列第 1**，为该子项全榜最高；提交所用引擎与本仓库发布的本地引擎同源，未针对赛道做任何特调。榜单于 2026-11-19 发布，详见 [AML 官方榜单](https://agentmemories.ai/leaderboard/)。
 
-*内置 **Live Console**（`rolling-memory panel`）一览——本地金库遥测、MCP `recall` 账本与三层记忆资产增长，全部在本机运行、零外部网络请求。*
+![Agent Memory Leaderboard 第二期 — Rolling Memory 在闭源方法榜代码赛道 Noisy 新功能子能力以 80.39% 解决率位列第 1](../assets/aml-cycle2-code-noisy-new-feature.webp)
+
+*AML 第二期 · 闭源方法榜 · 代码赛道 · 代码子能力「Noisy 新功能」：**第 1 名 —— 解决率 80.39%**。[官方榜单 →](https://agentmemories.ai/leaderboard/)*
 
 > **开始使用**：运行 `curl -fsSL https://github.com/rocareer/rolling-memory/raw/main/install.sh | bash`（或在本地仓库运行 `bash install.sh`）连接你的编程助手，然后正常干活就行。需要追溯历史时问一句“上次那个 Bug 是在哪修的？”即可。详见[快速开始指南](harness.md)。
 
@@ -28,11 +30,17 @@
   ```
 - **预置了 U 盘随身模式**：因为程序和记忆库都是独立的本地文件，我们还预置了一个 U 盘便携模式（见 [`usb-portable.md`](usb-portable.md)），可以把记忆工具和记忆库一起塞进 U 盘随身带走。这个模式还比较新、我们没做充分测试，它也有个很现实的前提：**你得在不同的电脑上跑同一个项目，原来的项目记忆才会有用**。欢迎感兴趣的朋友一起尝试，好用不好用都欢迎告诉我们。
 
+上面这些全部只靠一个本地二进制和一个本地 SQLite 金库完成。内置的 **Live Console** 把它们放在同一屏里：
+
+![Rolling Memory Live Console — 本地金库遥测、MCP recall 账本与记忆资产增长](../assets/live-console-zh.webp)
+
+*内置 **Live Console**（`rolling-memory panel`）一览——本地金库遥测、MCP `recall` 账本与三层记忆资产增长，全部在本机运行、零外部网络请求。*
+
 > **关于当前发布版**：本仓库发布的是**纯本地模式（`local_plain`）**：召回、存储与结晶全部在本地金库完成，不发起任何记忆面网络请求；对外请求仅三类——你自行配置的评测大模型端点、可选的上游基准语料下载、可选的更新检查。另有面向高级与企业用户的独立**云端记忆服务**（端到端密文设计）采用申请制提供，不属于本仓库；发布与许可边界见 [DECLARATION.md](DECLARATION.md)，获取帮助见 [SUPPORT.md](SUPPORT.md)。
 
 ---
 
-## 1. 它在日常工作中到底有什么效果？（能省一点是一点）
+## 1. 日常工作中，它到底能带来什么？（能省一点是一点）
 
 它做的事情非常实在：把你的历史对话和本地文档**按原话保存在本机的 SQLite 里**，用本地词法与统计检索建好索引，给你的 Agent 提供一个 `recall`（回忆）工具。
 
@@ -53,7 +61,7 @@
 
 ---
 
-## 2. 为什么选择“保留原话 + 本地词法统计检索”？
+## 2. 为什么坚持「保留原话 + 本地词法统计检索」？
 
 目前很多记忆方案会在写入时调用大模型把对话改写成摘要，或者切块转成向量。这些做法各有优势（摘要省空间、向量能跨同义词），但我们之所以选择先做扎实的本地原话检索，是基于四点很朴素的考虑：
 
@@ -79,9 +87,26 @@
 
 ---
 
-## 4. 公开基准实测与不足之处
+## 4. 独立第三方评测与公开基准成绩
 
-我们在两个公开长期记忆基准（剑桥大学 **ATM-Bench** 的 11,034 条个人多模态文本记录，以及 **LoCoMo** 的 5,882 轮长对话、1,540 道问题）上测试了这套本地检索。所有数字均可从归档的逐题检索结果（JSONL）直接复算。
+### 4.1 AML 第二期 —— 官方第三方评测
+
+**Agent Memory Leaderboard（AML，记忆之巅）** 是由 Datawhale 联合近 30 家高校与研究机构共同组织的公开横评：所有参赛系统使用同一套任务、同一生成模型与同一评分模型，差异主要来自记忆系统本身。Rolling Memory 以本仓库发布的同一套本地引擎参加代码赛道闭源方法榜，未做任何赛道特调。
+
+| 代码赛道读数（AML 第二期，2026-11-19 发布） | 结果 | 名次 |
+|---|---|---|
+| **Noisy 新功能解决率** | **80.39%** | **全榜第 1** |
+| Noisy 总体解决率 | 62.00% | 闭源方法榜并列第 3 |
+| 代码赛道官方综合排名（Overall） | 61.00 | 第 5 |
+| Noisy 缺陷修复解决率 | 52.53% | 中游 |
+
+页面顶部的图片即为「Noisy 新功能」子项的官方榜单卡。请按子项粒度理解：**80.39% 是一个子能力读数，不代表 Rolling Memory 在代码记忆的每个维度都排第一。** 同一赛道的缺陷修复子项（52.53%）正说明了另一半：把同仓库历史经验迁移到新功能，是「原话 + 高信息量检索」最擅长的场景；而精确找回对当前代码版本仍然有效的旧修复，是另一种更难的检索问题，我们仍在补强。代码赛道官方综合排名为第 5；AML 三个赛道使用不同任务与指标，不能互相折算或比较。
+
+官方榜单：<https://agentmemories.ai/leaderboard/>
+
+### 4.2 ATM-Bench 与 LoCoMo —— 可复现的本地读数
+
+我们也在两个公开长期记忆基准（剑桥大学 **ATM-Bench** 的 11,034 条个人多模态文本记录，以及 **LoCoMo** 的 5,882 轮长对话、1,540 道问题）上测试了这套本地检索。所有数字均可从归档的逐题检索结果（JSONL）直接复算。
 
 > **指标说明**：下表中的 ATM-Bench 官方 `Recall@10` 严格采用官方评测脚本（`comprehensive_eval.py`）的**逐题金标集合覆盖率均值**公式；`Any-Hit@10`（前 10 条结果里至少命中 1 条金标证据的题目比例）与 `All-Hit@10`（前 10 条结果里包含全部金标证据的题目比例）作为辅助指标单独列出，不与官方 `Recall@10` 混比。插件日常使用（`rmem recall` / MCP `recall`）与 `rmem eval` 评测运行器完全共用同一个本地引擎、同一套单句谐波编码器与排序器。
 
@@ -98,11 +123,13 @@
 - **现行产品臂**：上表 ATM 两行是 `local_plain` 产品臂的现行读数（语料 `c9c4cc55…`、题面 `3c4cbf84…` / `f6f63ff1…`），2026-11-20 复核。综合分（0.70 × Main R@10 + 0.30 × Hard R@10）= **73.67**。v0.0.1 冻结读数（77.21% / 46.12%）仅作为历史值保留在变更日志中，请勿与现行行混比。
 - **耗时**按单次运行记录，受缓存状态、CPU 与并发影响；上表数值只作单次参考，不是跨运行基准。
 
+### 4.3 怎么读这些数字
+
 这些数字既展示了纯本地词法统计的潜力，也清楚地暴露了它的短板：
 
 - **仍有约七分之一的题目在 Top-10 里没找着（以及为什么这在你的 Harness 开发中影响没那么大）**：在 ATM Main 的 1,013 道题中，有 **148 道题（14.61%）** 在前 10 条里没有命中任何金标证据，其中 **86 道题** 在前 50 条里也没有命中；Hard 的 31 道题中有 **6 道题** 未进前 10（**4 道** 未进前 50）。复盘这些漏召回可以发现，找不到的基本都是**提问与原文在词面上没有交集**的情况——这在**真人生活对话**里很常见：比如聊起“老张”和“张三”，字面不是一个词却是同一个人；或者日常口语里常有指代不明、省略主语的表述（比如“这个项目……那个人……后来做完了”之类）。但在你的 **Harness Agent 日常开发**中，通常是用同一个模型围绕同一个代码库完成开发，AI 的输出用词一致、表述完整，基本不会出现语病和指代不清，讨论的核心又是固定的模块名、函数名与文件路径——恰恰适合本系统的词法分析架构，向量和图技术在这里能发挥的额外作用其实没那么大（而在向量与图记忆领域，我们团队其实也是专业的，此前在 LoCoMo 基准上做出过 **92.79 分**的成绩，之所以在这里不默认上向量和图，纯粹是基于日常开发性价比的务实取舍）。
 - **加上本地小向量能补回多少（对照测试）**：在同一批 11,034 条记录上，单独跑本地向量模型 `all-MiniLM-L6-v2` 的官方 `Recall@10` 是 Main 67.35% / Hard 29.58%。在该次对照实验中（融合前参考基线：Main 76.72% / Hard 41.93%），把小权重（$w_{\mathrm{vec}} = 0.15$）的向量与本项目的词法统计主干做 RRF 融合后，Main `Recall@10` 达到 **78.42%（+1.70 个百分点，净增 17 道命中题）**，Hard 达到 **42.96%–43.20%**；但如果按**等权重（$w_{\mathrm{vec}} = 1.00$）**融合，向量噪声反而会把 Hard 拉低到 **38.68%（下降 3.25 个百分点）**。
-- **同口径公开基线参考（非官方榜单提交）**：在相同的标准固定 2B SGM 文本协议下，ATM-Bench 公开基线的官方 `Recall@10` 参考值为：Main 上 MemPalace 76.40%、ATM-RAG 68.70%、HippoRAG2 66.40%、Mem0 61.90%；Hard 上 MemoryOS 32.70%、HippoRAG2 31.90%、ATM-RAG 30.40%、Mem0 23.70%。本项目的数字是本地复算结果，**并非官方榜单提交成绩，也不主张任何榜单排名**。
+- **同口径 ATM-Bench 公开基线参考（仅作参照，本项目不是 ATM-Bench 官方榜单提交）**：在相同的标准固定 2B SGM 文本协议下，ATM-Bench 公开基线的官方 `Recall@10` 参考值为：Main 上 MemPalace 76.40%、ATM-RAG 68.70%、HippoRAG2 66.40%、Mem0 61.90%；Hard 上 MemoryOS 32.70%、HippoRAG2 31.90%、ATM-RAG 30.40%、Mem0 23.70%。本项目的 ATM 数字是本地复算结果，**并非 ATM-Bench 官方榜单提交成绩**；本项目对外报告的唯一官方第三方榜单成绩，是 §4.1 的 AML 第二期结果。
 
 ---
 
@@ -110,7 +137,7 @@
 
 1. **记录下来 $\neq$ 内容一定正确**：记忆系统只负责告诉你“过去某条记录里这么写过”，无法保证那句话当时没说错、或者现在没过期。真伪核验始终需要人和下游 Agent 自己把关。
 2. **“不调大模型”和“不出网”仅指记忆存取本身**：记忆的入库、建索引和检索完全在本地完成；但如果你的 Agent 连接的是云端大模型 API，那么被 `recall` 找出来的片段在跟随对话发给大模型时，依然会发往对应的模型服务商。
-3. **评测结果带有同题集迭代的因素**：检索权重和规则在开发过程中针对 ATM-Bench 和 LoCoMo 做过多轮排错与调整，不能直接等同于在未知数据集上的盲测表现。
+3. **评测结果带有同题集迭代的因素**：检索权重和规则在开发过程中针对 ATM-Bench 和 LoCoMo 做过多轮排错与调整，不能直接等同于在未知数据集上的盲测表现。AML 成绩是第二期单轮、单赛道榜单的读数，不保证在后续周期或其它赛道上复现。
 4. **语种与超大规模场景仍待更多检验**：目前的评测集中在英文个人档案与长对话（万级记录）。更多语种、重度中英混杂以及百万级记录下的表现，还需要大家一起测试和改进。
 5. **按原样（AS IS）提供**：软件不提供任何担保，完整声明见 [DECLARATION.md](DECLARATION.md)。
 
@@ -266,6 +293,7 @@ Claude Code、Cursor、Windsurf、ZCode 等工具提供各自的指令和记忆�
 ## 11. 源码许可、贡献入口与致谢
 
 - **贡献入口**：非常欢迎大家提 Issue、分享想法或提交 PR 一起完善——见 [CONTRIBUTING.md](CONTRIBUTING.md) 与 [SUPPORT.md](SUPPORT.md)。本项目采用**「人类定义架构、形式化不变量与验收标准 + AI 辅助代码实现」**的协作模式；完整免责说明见 [DECLARATION.md](DECLARATION.md)。
+- **贡献者**：外部贡献统一记录在 [CONTRIBUTORS.md](../../CONTRIBUTORS.md)。感谢 [@Buyou27](https://github.com/Buyou27) 提交 Windows PowerShell 5.1 兼容性修复（[`install.ps1`](../../install.ps1)，[#2](https://github.com/rocareer/rolling-memory/pull/2)）。
 - **源码许可**：采用 **[PolyForm Noncommercial License 1.0.0](../../LICENSE)**（SPDX：`PolyForm-Noncommercial-1.0.0`）公开全部源码（含 `sdk/` 下客户端 SDK，见 `sdk/LICENSE`），**任何非商业用途均可自由使用、修改与分享**；**商业使用与商业分发（含 SaaS 托管与商业产品内嵌）须另行签署书面商业许可**。第三方组件署名见 [NOTICE](../../NOTICE)。
 - **致谢**：本项目的 Web 管理控制台以 **[AI GO ADMIN](https://github.com/ai-go-hub/ai-go-admin)**（Apache-2.0，Go + Gin + Vue 3 后台框架；镜像：[Gitee](https://gitee.com/ai-go-hub/ai-go-admin) · [AtomGit](https://atomgit.com/ai-go-hub/ai-go-admin)）为基座衍生开发；其 UI 血统承自 **[BuildAdmin](https://gitee.com/wonderful-code/buildadmin)**（Apache-2.0，© 妙码生花），插件清单页按 BuildAdmin `v2.3.9` 移植改写。逐文件归属与修改说明见 [NOTICE](../../NOTICE) §2。感谢两个开源项目的作者与社区。
 

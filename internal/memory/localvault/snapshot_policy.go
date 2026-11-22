@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	core "github.com/rocareer/rolling-memory/internal/core"
 )
 
 // snapshotBuiltDocsRevKey records the corpus write generation the last
@@ -277,30 +279,50 @@ func (v *Vault) RebuildCorpusSnapshot(ctx context.Context) (int64, error) {
 	if strings.TrimSpace(signature) == "" {
 		return 0, errors.New("localvault: canonical store is not populated")
 	}
+	if previousChangeSeq > 0 && previousChangeSeq < builtChangeSeq {
+		result, incErr := v.buildCorpusEngineIncremental(ctx, previousChangeSeq)
+		if incErr == nil && result != nil {
+			pubErr := v.publishBuiltGeneration(ctx, signature, result.changeSeq, result.docsRev, result.purgeEpoch, result.eng)
+			_ = result.eng.Close()
+			if pubErr == nil {
+				v.pruneChangeLog(ctx, previousChangeSeq)
+				return result.docsRev, nil
+			}
+		}
+	}
 	eng := v.buildCorpusEngine(ctx)
 	if eng == nil {
 		return 0, errors.New("localvault: full-corpus build failed")
 	}
+	if err := v.publishBuiltGeneration(ctx, signature, builtChangeSeq, builtDocsRev, builtPurgeEpoch, eng); err != nil {
+		return 0, err
+	}
+	v.pruneChangeLog(ctx, previousChangeSeq)
+	return builtDocsRev, nil
+}
+
+// publishBuiltGeneration writes one generation, records the build marker and
+// drops the reader cache so the next load resolves the new slot.
+func (v *Vault) publishBuiltGeneration(ctx context.Context, signature string, changeSeq, docsRev, purgeEpoch int64, eng *core.Engine) error {
 	var publishedDocs []vaultDocEntry
 	if docs, _, docsErr := v.canonicalSnapshotDocs(ctx); docsErr == nil {
 		publishedDocs = docs
 	}
-	if _, err := v.publishCorpusSlot(ctx, v.mainDBPath(), signature, builtChangeSeq, builtDocsRev, eng, publishedDocs); err != nil {
-		return 0, err
+	if _, err := v.publishCorpusSlot(ctx, v.mainDBPath(), signature, changeSeq, docsRev, eng, publishedDocs); err != nil {
+		return err
 	}
 	if !v.PublishedSnapshotReady() {
-		return 0, errors.New("localvault: snapshot publish failed")
+		return errors.New("localvault: snapshot publish failed")
 	}
-	if err := v.recordSnapshotBuildAt(ctx, builtDocsRev, builtChangeSeq, builtPurgeEpoch); err != nil {
-		return 0, err
+	if err := v.recordSnapshotBuildAt(ctx, docsRev, changeSeq, purgeEpoch); err != nil {
+		return err
 	}
-	v.pruneChangeLog(ctx, previousChangeSeq)
 	v.slotCacheMu.Lock()
 	if v.snapRef != nil {
 		v.snapRef.snap = nil
 	}
 	v.slotCacheMu.Unlock()
-	return builtDocsRev, nil
+	return nil
 }
 
 // AcquireBuildLock guards the single snapshot-builder slot across processes.

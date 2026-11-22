@@ -488,151 +488,15 @@ func (v *Vault) loadCanonicalEngine(ctx context.Context) *core.Engine {
 // loadCanonicalDocs reconstructs core.Doc values from the canonical tables for
 // the incremental overlay. It reads terms as stored by core.Store.Ingest; no
 // packed atoms and no role inference are involved.
+// loadCanonicalDocs reconstructs the kernel unit representation for a bounded
+// delta batch. The hydration itself lives in loadChangedDocs so the builder and
+// the overlay share one implementation.
 func (v *Vault) loadCanonicalDocs(ctx context.Context, unitIDs []string) ([]core.Doc, bool) {
-	if v == nil || v.db == nil || len(unitIDs) == 0 {
-		return nil, true
+	docs, err := v.loadChangedDocs(ctx, unitIDs)
+	if err != nil {
+		return nil, false
 	}
-	ids := append([]string(nil), unitIDs...)
-	sort.Strings(ids)
-	out := make([]core.Doc, 0, len(ids))
-	const chunk = 400
-	for start := 0; start < len(ids); start += chunk {
-		end := start + chunk
-		if end > len(ids) {
-			end = len(ids)
-		}
-		batch := ids[start:end]
-		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(batch)), ",")
-		args := toAnySlice(batch)
-
-		docRows, err := v.db.QueryContext(ctx, `
-			SELECT unit_id, occurred_at, narrated_at, ingested_at, author_hash, doc_hash, block_hash,
-			       line_start, line_end, layer, raw_text
-			FROM rm_docs WHERE unit_id IN (`+placeholders+`)`, args...)
-		if err != nil {
-			return nil, false
-		}
-		byID := make(map[string]int, len(batch))
-		for docRows.Next() {
-			var doc core.Doc
-			var author, docHash, blockHash int64
-			var lineStart, lineEnd int64
-			if err := docRows.Scan(&doc.UnitID, &doc.OccurredAt, &doc.NarratedAt, &doc.IngestedAt,
-				&author, &docHash, &blockHash, &lineStart, &lineEnd, &doc.Layer, &doc.RawText); err != nil {
-				docRows.Close()
-				return nil, false
-			}
-			doc.AuthorHash = uint64(author)
-			doc.DocHash = uint64(docHash)
-			doc.BlockHash = uint64(blockHash)
-			doc.LineStart = int(lineStart)
-			doc.LineEnd = int(lineEnd)
-			doc.Terms = make(map[uint64]core.Term, 64)
-			doc.Counts = make(map[uint64]int, 64)
-			doc.Positions = make(map[uint64][]core.TermPosition, 64)
-			out = append(out, doc)
-			byID[doc.UnitID] = len(out) - 1
-		}
-		if err := docRows.Err(); err != nil {
-			docRows.Close()
-			return nil, false
-		}
-		docRows.Close()
-
-		termRows, err := v.db.QueryContext(ctx, `
-			SELECT unit_id, term_hash, bits_x10, class_flags, group_hash, occurrences, pos_blob
-			FROM rm_terms WHERE unit_id IN (`+placeholders+`) ORDER BY unit_id, term_hash`, args...)
-		if err != nil {
-			return nil, false
-		}
-		for termRows.Next() {
-			var unitID string
-			var hash, bitsX10, classFlags, groupHash, occ int64
-			var posBlob []byte
-			if err := termRows.Scan(&unitID, &hash, &bitsX10, &classFlags, &groupHash, &occ, &posBlob); err != nil {
-				termRows.Close()
-				return nil, false
-			}
-			doc := byID[unitID]
-			if doc < 0 {
-				continue
-			}
-			target := &out[doc]
-			var positions []core.TermPosition
-			if len(posBlob) > 0 {
-				decoded, _, decErr := core.DecodePositionsIntoArena(posBlob, nil)
-				if decErr != nil {
-					termRows.Close()
-					return nil, false
-				}
-				positions = decoded
-			}
-			h := uint64(hash)
-			role, lowExt := core.UnpackTermRoleExt(uint8((classFlags >> 8) & 0xff))
-			ext := core.TermPersistExtFlags(classFlags)
-			if ext == 0 {
-				ext = lowExt
-			}
-			term := core.Term{
-				Hash:     h,
-				Bits:     uint16(bitsX10),
-				Flags:    uint8(classFlags),
-				Role:     role,
-				ExtFlags: ext,
-				Group:    uint64(groupHash),
-			}
-			if len(positions) > 0 {
-				term.Sent = clampPosU16(positions[0].Sentence + 1)
-				term.Slot = clampPosU16(positions[0].Slot + 1)
-			}
-			target.Terms[h] = term
-			if occ < 1 {
-				occ = 1
-			}
-			target.Counts[h] = int(occ)
-			if len(positions) > 0 {
-				target.Positions[h] = positions
-			}
-		}
-		if err := termRows.Err(); err != nil {
-			termRows.Close()
-			return nil, false
-		}
-		termRows.Close()
-
-		citeRows, err := v.db.QueryContext(ctx, `
-			SELECT unit_id, cited_id FROM rm_citations WHERE unit_id IN (`+placeholders+`) ORDER BY unit_id, ord`, args...)
-		if err != nil {
-			return nil, false
-		}
-		for citeRows.Next() {
-			var unitID, citedID string
-			if err := citeRows.Scan(&unitID, &citedID); err != nil {
-				citeRows.Close()
-				return nil, false
-			}
-			if idx, ok := byID[unitID]; ok {
-				out[idx].CitedIDs = append(out[idx].CitedIDs, citedID)
-			}
-		}
-		if err := citeRows.Err(); err != nil {
-			citeRows.Close()
-			return nil, false
-		}
-		citeRows.Close()
-	}
-	// Preserve the caller's order so OverlayDelta sees a deterministic batch.
-	ordered := make([]core.Doc, 0, len(out))
-	byID := make(map[string]core.Doc, len(out))
-	for _, doc := range out {
-		byID[doc.UnitID] = doc
-	}
-	for _, id := range ids {
-		if doc, ok := byID[id]; ok {
-			ordered = append(ordered, doc)
-		}
-	}
-	return ordered, true
+	return docs, true
 }
 
 // cacheCSREngineIdentity records the freshly persisted baseline on the shared

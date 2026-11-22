@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -905,6 +906,37 @@ func FormatATMEvidencePayload(question string, retIDs []string, byID map[string]
 	return userPrompt, formattedLines
 }
 
+// ATMAnswerIsEvidenceIndexEcho reports whether an answer is a pure comma-separated list of
+// evidence-block numbers inside the delivered window. The official MMRAG shell labels each
+// block "Evidence N:" (MMRag/mmrag_utils.py build_text_messages), so a model can echo those
+// labels instead of the item IDs; such an answer cannot match the released gold. The check
+// is purely formal (positive integers within [1, deliveredK], at least two entries) and
+// never consults the question's gold evidence.
+func ATMAnswerIsEvidenceIndexEcho(answer string, deliveredK int) bool {
+	if deliveredK <= 0 {
+		return false
+	}
+	trimmed := strings.TrimSpace(answer)
+	if trimmed == "" || !strings.Contains(trimmed, ",") {
+		return false
+	}
+	parts := strings.Split(trimmed, ",")
+	if len(parts) < 2 {
+		return false
+	}
+	for _, part := range parts {
+		field := strings.TrimSpace(part)
+		if field == "" {
+			return false
+		}
+		n, err := strconv.Atoi(field)
+		if err != nil || n < 1 || n > deliveredK {
+			return false
+		}
+	}
+	return true
+}
+
 func extractATMEvidenceIDsFromText(text string) []string {
 	if strings.TrimSpace(text) == "" {
 		return nil
@@ -1216,7 +1248,7 @@ func RunATM(cfg *config.Config, opts Options) (map[string]any, error) {
 				prediction := ""
 				answerErr := ""
 				if ansClient != nil {
-					ans, aErr := ansClient.CompleteWithRetry(ATMSystemPrompt, userPayload)
+					ans, aErr := ansClient.CompleteWithRetryRequestID(ATMSystemPrompt, userPayload, q.ID)
 					if aErr != nil {
 						answerErr = aErr.Error()
 					} else {
@@ -1313,6 +1345,7 @@ func RunATM(cfg *config.Config, opts Options) (map[string]any, error) {
 					"retrieval_ids":        retIDs,
 					"retrieval_recall":     recMap,
 					"prediction":           prediction,
+					"index_echo":           ATMAnswerIsEvidenceIndexEcho(prediction, qRetrieveK),
 					"f1":                   PyRound(f1, 4),
 					"exact":                exact,
 					"evidence_recall":      PyRound(r10, 4),

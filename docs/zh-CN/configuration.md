@@ -50,11 +50,12 @@ rmem config set <section.key> <value>
 
 交付窗口也可以在「记忆总览」页页眉直接切换。
 
-### 2.3 后台引擎内存上限 —— `[daemon]`
+### 2.3 后台引擎 —— `[daemon]`
 
 | 键 | 默认 | 含义 |
 |---|---|---|
 | `daemon.memory_limit` | `auto` | 后台引擎守护进程的堆内存软上限 |
+| `daemon.snapshot_interval` | `60s` | 后台已发布代的固定节拍（`10s–1h`） |
 
 可选值：
 
@@ -68,6 +69,8 @@ rmem config set <section.key> <value>
 - `rmem daemon status --json` 会报告生效上限及其来源（`auto` / `explicit` / `env` / `off` / `unavailable`）。
 - 若设置了 `GOMEMLIMIT` 环境变量，它优先于配置文件（Go 运行时标准语义）。
 - 物理内存探测失败时不设上限——守护进程保持运行时默认值，而不是猜一个数。
+
+**已发布代节拍。** 后台构建器按固定节拍发布待发布变更（默认 60 秒）。写入会立即持久化，但在下一代发布后才可检索。日常 harness 工作通常不需要即时可见：当前这一轮——刚读的文件、刚跑的命令、刚交换的消息——本来就在模型上下文中，记忆检索服务的是已经掉出上下文的旧材料。因此，短暂的发布延迟是为长会话与大导入期间的稳定召回做的刻意取舍。需要更快可见时设 `snapshot_interval = "30s"`；想减少后台工作量可设更大的值，如 `"5m"`。第一代立即构建；构建失败后按两分钟退避重试。该值接受 Go 时长（`60s`、`5m`）或纯秒数（`60`）。
 
 ### 2.4 存储档位 —— `[storage]`
 
@@ -103,6 +106,7 @@ rmem config set <section.key> <value>
 | `ROLLING_MEMORY_UPDATE_CHANNEL` | `update.channel` |
 | `ROLLING_MEMORY_UPDATE_SOURCE` | `update.source` |
 | `ROLLING_MEMORY_DAEMON_MEMORY_LIMIT` | `daemon.memory_limit` |
+| `ROLLING_MEMORY_SNAPSHOT_INTERVAL` | `daemon.snapshot_interval` |
 | `ROLLING_MEMORY_DAEMON_SOCKET` | 引擎 socket 路径 |
 | `ROLLING_MEMORY_PORTABLE` | 强制便携模式并指定载荷根目录 |
 | `GOMEMLIMIT` | Go 运行时软内存上限（设置后优先于 `daemon.memory_limit`） |

@@ -5,6 +5,7 @@ package core
 
 import (
 	"math"
+	"slices"
 	"sort"
 )
 
@@ -299,6 +300,29 @@ func lessSentGroupW(a, b rmStructSentGroupW) bool {
 
 // sortSentGroupW is a typed insertion sort over small slices (falling back to
 // sort.Slice for larger inputs), avoiding reflection overhead on the hot path.
+// sentGroupWCompare mirrors lessSentGroupW as a typed comparator.
+func sentGroupWCompare(a, b rmStructSentGroupW) int {
+	if a.sent != b.sent {
+		if a.sent < b.sent {
+			return -1
+		}
+		return 1
+	}
+	if a.group != b.group {
+		if a.group < b.group {
+			return -1
+		}
+		return 1
+	}
+	if a.weight > b.weight {
+		return -1
+	}
+	if a.weight < b.weight {
+		return 1
+	}
+	return 0
+}
+
 func sortSentGroupW(s []rmStructSentGroupW) {
 	if len(s) <= 32 {
 		for i := 1; i < len(s); i++ {
@@ -312,7 +336,7 @@ func sortSentGroupW(s []rmStructSentGroupW) {
 		}
 		return
 	}
-	sort.Sort(sentGroupWSort(s))
+	slices.SortFunc(s, sentGroupWCompare)
 }
 
 func sortInt64Asc(s []int64) {
@@ -331,6 +355,24 @@ func sortInt64Asc(s []int64) {
 	sort.Sort(int64AscSort(s))
 }
 
+// structGroupWCompare mirrors the insertion-sort order above: group ascending then
+// weight descending.
+func structGroupWCompare(a, b rmStructGroupW) int {
+	if a.group != b.group {
+		if a.group < b.group {
+			return -1
+		}
+		return 1
+	}
+	if a.weight > b.weight {
+		return -1
+	}
+	if a.weight < b.weight {
+		return 1
+	}
+	return 0
+}
+
 func sortStructGroupW(s []rmStructGroupW) {
 	if len(s) <= 32 {
 		for i := 1; i < len(s); i++ {
@@ -344,7 +386,7 @@ func sortStructGroupW(s []rmStructGroupW) {
 		}
 		return
 	}
-	sort.Sort(structGroupWSort(s))
+	slices.SortFunc(s, structGroupWCompare)
 }
 
 // Concrete sort.Interface adapters for the typed helpers above and for large
@@ -750,8 +792,11 @@ func (sc *rmQueryScratch) nextSentGen(maxSent int) uint32 {
 }
 
 type rmClusterState struct {
-	docRowPtr       []uint32
-	docEntriesFlat  []rmDocEntry
+	docRowPtr      []uint32
+	docEntriesFlat []rmDocEntry
+	// entryMass 是每个条目的词项质量快照（按 docEntriesFlat 下标），每代只查一次
+	// idx.Mass，供句能均值与 fastDocs 直读，避免数百万次映射查询。
+	entryMass       []float64
 	posPool         []uint32
 	postings        map[uint64][]rmPostingEntry
 	termKeys        []uint64
@@ -1456,6 +1501,13 @@ func (e *Engine) ensureClusterState() *rmClusterState {
 	if idx == nil {
 		return nil
 	}
+	// 写路径只累积挂起基座与扣减集，物化在此一次结算为增量扩展。
+	if e.prevClusterState == nil && e.pendingBase != nil {
+		e.prevClusterState = e.pendingBase
+		e.prevDrops = e.pendingDrops
+		e.pendingBase = nil
+		e.pendingDrops = nil
+	}
 	inc := e.takeIncrementalDelta(idx)
 	var totalDocEntries int
 	var totalPositions int
@@ -1574,6 +1626,43 @@ func (e *Engine) ensureClusterState() *rmClusterState {
 			uGroups = idx.UnitGroups[u]
 		}
 		start, end := st.docRowPtr[u], st.docRowPtr[u+1]
+		// 幸存单元：条目与位置与上一代逐字节相同，整段复制并按新位置池重定位 posOff，
+		// 省掉逐条目的映射查表与位置重新打包（不改变任何排序）。
+		if inc != nil && !inc.delta[u] && inc.prev != nil && !inc.prev.hasWidePos() {
+			if oldU := inc.oldOf[u]; oldU >= 0 && int(oldU) < len(inc.prev.docRowPtr)-1 {
+				pStart, pEnd := inc.prev.docRowPtr[oldU], inc.prev.docRowPtr[oldU+1]
+				n := int(pEnd - pStart)
+				if n == int(end-start) {
+					copy(st.docEntriesFlat[start:end], inc.prev.docEntriesFlat[pStart:pEnd])
+					base := uint32(len(st.posPool))
+					for k := 0; k < n; k++ {
+						en := &st.docEntriesFlat[start+uint32(k)]
+						if en.posLen == 0 {
+							en.posOff = base
+							continue
+						}
+						st.posPool = append(st.posPool, inc.prev.posPool[en.posOff:en.posOff+en.posLen]...)
+						en.posOff = base
+						base += en.posLen
+					}
+					for k := 0; k < n; k++ {
+						en := st.docEntriesFlat[start+uint32(k)]
+						if en.flags&rmFlagCompanion == 0 {
+							st.isPrimaryWord[en.id] = true
+						}
+						if prevGrp, ok := st.parentGroup[en.id]; !ok || en.group < prevGrp {
+							st.parentGroup[en.id] = en.group
+						}
+						if en.bits > 0 {
+							bitSum += float64(en.bits)
+							bitCount++
+						}
+					}
+					docDyadRowPtr[u] = uint32(len(docDyadsFlat))
+					continue
+				}
+			}
+		}
 		entries := st.docEntriesFlat[start:end:end]
 		for i := range entries {
 			h := entries[i].id
@@ -1677,6 +1766,10 @@ func (e *Engine) ensureClusterState() *rmClusterState {
 		docDyadsFlat = append(docDyadsFlat, dyadScratch...)
 	}
 	docDyadRowPtr[idx.N] = uint32(len(docDyadsFlat))
+	st.entryMass = make([]float64, len(st.docEntriesFlat))
+	for i := range st.docEntriesFlat {
+		st.entryMass[i] = idx.Mass[st.docEntriesFlat[i].id]
+	}
 
 	// Postings are one per doc dyad in the same order: size the posting slice
 	// exactly from the finished docDyadsFlat pass instead of growing both
@@ -1901,8 +1994,9 @@ func (st *rmClusterState) buildFastDocs(idx *Index) {
 		entries := st.docEntriesOf(int32(u))
 		docGW = docGW[:0]
 		var subjNormSq float64
-		for _, entry := range entries {
-			w := idx.Mass[entry.id]
+		base := st.docRowPtr[u]
+		for ei, entry := range entries {
+			w := st.entryMass[base+uint32(ei)]
 			if math.IsNaN(w) || math.IsInf(w, 0) || w <= 0 {
 				continue
 			}
@@ -1949,26 +2043,9 @@ func (st *rmClusterState) buildFastDocs(idx *Index) {
 	if st.totalDaysM < 1 {
 		st.totalDaysM = 1
 	}
-	// Precompute only direct time neighbors and pairs read during construction.
-	// Other co-episode pairs use the same on-demand computation as out-of-domain
-	// pairs, keeping the runtime state read-only and construction linear in reads.
-	st.dayCos = make(map[uint64]float64)
-	for u := 0; u < idx.N; u++ {
-		a := int32(u)
-		st.visitNeighbors(a, func(b int32) bool {
-			if b <= a {
-				return true
-			}
-			if c := st.computeDocSubjectCos(idx, a, b); c > 0 {
-				x, y := uint32(a), uint32(b)
-				if x > y {
-					x, y = y, x
-				}
-				st.dayCos[(uint64(x)<<32)|uint64(y)] = c
-			}
-			return true
-		})
-	}
+	// 日余弦是查询无关但随 N 变化的派生量：预计算需要遍历全部邻接对，而每次写入都会
+	// 改变 N。这里不再按代预生成，改由 docSubjectCos 在查询内按需计算（同一函数、数值
+	// 完全一致，按查询的 scratch 有界缓存），发布只维护事实与计数。
 	// Preserve orthogonal-interleaver transparency as sparse extra bucket edges:
 	// the base bucket sequence stays shared, while only coherent buckets beyond
 	// the legacy ±2 band are recorded per unit.
@@ -2039,6 +2116,11 @@ func (st *rmClusterState) buildOrthogonalTransparentExtras(idx *Index) {
 	st.extraNeighborRowPtr[n] = uint32(len(st.extraNeighborBuckets))
 }
 
+// maxQueryDayCosEntries bounds the per-scratch day-cosine memo. The memo is a
+// pure cache: dropping it only recomputes exact values. 1<<19 entries is about
+// 32 MiB at the map's per-entry cost.
+const maxQueryDayCosEntries = 1 << 19
+
 func (st *rmClusterState) docSubjectCos(idx *Index, sc *rmQueryScratch, a, b int32) float64 {
 	// The warm domain only chooses which pairs are cached. A missing entry must
 	// be computed by the same function as an out-of-domain pair; returning zero
@@ -2082,6 +2164,8 @@ func (st *rmClusterState) docSubjectCos(idx *Index, sc *rmQueryScratch, a, b int
 		} else if sc != nil {
 			if sc.dayCos == nil {
 				sc.dayCos = make(map[uint64]float64)
+			} else if len(sc.dayCos) >= maxQueryDayCosEntries {
+				clear(sc.dayCos)
 			}
 			sc.dayCos[key] = val
 		}
@@ -2111,6 +2195,8 @@ func (st *rmClusterState) docSubjectCosLocal(idx *Index, sc *rmQueryScratch, a, 
 		if sc != nil {
 			if sc.dayCos == nil {
 				sc.dayCos = make(map[uint64]float64)
+			} else if len(sc.dayCos) >= maxQueryDayCosEntries {
+				clear(sc.dayCos)
 			}
 			sc.dayCos[key] = val
 		}
@@ -2253,6 +2339,23 @@ func (s rmPackedOccurrenceSort) Less(i, j int) bool {
 }
 func (s rmPackedOccurrenceSort) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
 
+// rmPackedOccurrenceCompare orders by packed position then term id.
+func rmPackedOccurrenceCompare(a, b rmPackedOccurrence) int {
+	if a.pos != b.pos {
+		if a.pos < b.pos {
+			return -1
+		}
+		return 1
+	}
+	if a.id < b.id {
+		return -1
+	}
+	if a.id > b.id {
+		return 1
+	}
+	return 0
+}
+
 // maxPhraseSlotSpan 定义同句二元短语（dyad）索引的最大词槽跨度：
 // 相邻词槽距离为 1，中间最多允许隔 3 个修饰/功能词槽（总跨度 4），控制短语倒排体积 O(L*W)。
 // [calibrated] maxPhraseSlotSpan — slot-distance span (slots) of the intra-sentence
@@ -2337,7 +2440,7 @@ func (st *rmClusterState) extractDocDyadsInto(entries []rmDocEntry, occs []rmPac
 	if len(occs) < 2 {
 		return out[:0], occs
 	}
-	sort.Sort(rmPackedOccurrenceSort(occs))
+	slices.SortFunc(occs, rmPackedOccurrenceCompare)
 	out = out[:0]
 	const maxSpan = uint32(maxPhraseSlotSpan)
 	for i, a := range occs {
@@ -2476,7 +2579,7 @@ func sortAndDedupRmDyads(pairs []rmDyad) []rmDyad {
 			pairs[j+1] = v
 		}
 	} else {
-		sort.Sort(rmDyadSort(pairs))
+		slices.SortFunc(pairs, rmDyadCompare)
 	}
 	w := 1
 	for i := 1; i < len(pairs); i++ {
@@ -2586,6 +2689,11 @@ func (st *rmClusterState) buildEffectiveWeightsFromDyads(idx *Index, docDyadRowP
 			}
 		}
 		docPairs := docDyadsFlat[docDyadRowPtr[u]:docDyadRowPtr[u+1]]
+		if termPartnerStats {
+			// 词项模式下伙伴计数按宿主词项单独维护（见 collectTermPartners），
+			// 这里不再构造族根伙伴表。
+			continue
+		}
 		rootPairs = rootPairs[:0]
 		for _, pair := range docPairs {
 			a, b := root(pair.a), root(pair.b)
@@ -2598,7 +2706,7 @@ func (st *rmClusterState) buildEffectiveWeightsFromDyads(idx *Index, docDyadRowP
 			rootPairs = append(rootPairs, rmDyad{a: a, b: b})
 		}
 		if len(rootPairs) > 1 {
-			sort.Sort(rmDyadSort(rootPairs))
+			slices.SortFunc(rootPairs, rmDyadCompare)
 		}
 		for i, pair := range rootPairs {
 			if i > 0 && pair == rootPairs[i-1] {
@@ -2612,7 +2720,14 @@ func (st *rmClusterState) buildEffectiveWeightsFromDyads(idx *Index, docDyadRowP
 		sortInt32Asc(f.clusters)
 		sortUint64Asc(f.partners)
 	}
-	agg := buildClusterAggregates(idx, families, st)
+	var termPartners map[uint64][]uint64
+	if termPartnerStats {
+		termPartners = collectTermPartners(idx, docDyadRowPtr, docDyadsFlat)
+	}
+	agg := buildClusterAggregates(idx, families, st, termPartners)
+	if termPartnerStats {
+		agg.refreshTermKeyedWeights(st, idx)
+	}
 	st.agg = agg
 	st.fillEffWeightFromAggregates(idx, agg)
 }
@@ -2663,18 +2778,26 @@ func (st *rmClusterState) calcMeanSentenceEnergy(idx *Index) float64 {
 	for u := 0; u < idx.N; u++ {
 		entries := st.docEntriesOf(int32(u))
 		sentGW = sentGW[:0]
-		for _, entry := range entries {
-			w := idx.Mass[entry.id]
+		base := st.docRowPtr[u]
+		for ei, entry := range entries {
+			w := st.entryMass[base+uint32(ei)]
 			if math.IsNaN(w) || math.IsInf(w, 0) || w <= 0 {
 				continue
 			}
 			g := effectiveEntryGroup(entry, idx, highDFThresh)
 			posList := st.entryPositionsOf(entry)
+			// 同一词项的同一句内多位置产生完全相同的 (句, 组, 权重)，折叠前只需一份：
+			// 每 (文档, 词项, 句) 保留一个条目，结果与逐位置完全一致。
+			lastSent := -1
 			for pi := range posList {
 				sent := int(posList[pi] >> 16)
 				if wide {
 					sent = st.entrySentExactAt(entry, pi)
 				}
+				if sent == lastSent {
+					continue
+				}
+				lastSent = sent
 				sentGW = append(sentGW, rmStructSentGroupW{sent: sent, group: g, weight: w})
 			}
 		}

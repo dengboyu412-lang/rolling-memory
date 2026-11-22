@@ -368,6 +368,11 @@ type vaultCorpusSnapshot struct {
 	// cached by the noetic fingerprint; the base engine stays untouched.
 	noeticEngine   *core.Engine
 	noeticEdgesKey string
+	// coreWorkerPool holds per-caller engine copies. Their query scratch carries
+	// the day-cosine memo across queries handled by the same worker; the core
+	// bounds that memo's size and the index pointer check drops copies from a
+	// previous snapshot generation.
+	coreWorkerPool sync.Pool
 	// coreWarm marks that one search has materialised the lazily built cluster
 	// state. Until then every search runs under coreMu; afterwards the state is
 	// immutable for this snapshot and each caller works on a shallow engine copy
@@ -428,6 +433,12 @@ type vaultSnapshotRef struct {
 	refreshing      bool
 	faultRefreshing bool
 	snap            *vaultCorpusSnapshot
+	// publishedSnap / publishedSlot cache the snapshot-only read generation.
+	// They are keyed by the CURRENT slot name and are never invalidated by
+	// in-process writes: a write becomes searchable when the builder publishes
+	// the next slot, not before.
+	publishedSnap *vaultCorpusSnapshot
+	publishedSlot string
 	// allowBuild is shared by every clone. A long-lived recall surface clears it
 	// so a missing or stale disk cluster degrades to a warming snapshot instead
 	// of running the minute-scale full-corpus build on the query path.
@@ -2229,6 +2240,12 @@ func (v *Vault) loadCorpusSnapshot(ctx context.Context) (*vaultCorpusSnapshot, e
 		return nil, err
 	}
 	v.checkExternalDBMutation()
+	if !v.BuildAllowed() {
+		if snap, ok := v.loadPublishedSnapshot(ctx); ok {
+			return snap, nil
+		}
+		return nil, nil
+	}
 	episodicCodecKey, err := v.episodicCodecKey()
 	if v.slotCacheMu != nil && v.snapRef != nil && err == nil {
 		v.slotCacheMu.RLock()

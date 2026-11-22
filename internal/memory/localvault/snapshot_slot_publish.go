@@ -72,6 +72,9 @@ func (v *Vault) publishCorpusSlot(ctx context.Context, dbPath, signature string,
 		cleanup()
 		return "", err
 	}
+	// The build sidecar is an optimisation: a failure leaves the next builder on
+	// the full materialisation path and must not block the read-side publish.
+	_ = core.WriteClusterBuildAux(filepath.Join(temp, snapshotSlotAgg), eng)
 	if ctx != nil && ctx.Err() != nil {
 		cleanup()
 		return "", ctx.Err()

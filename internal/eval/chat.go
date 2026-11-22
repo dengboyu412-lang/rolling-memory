@@ -104,6 +104,13 @@ func (c *ChatClient) Model() string { return c.model }
 //   - `max_tokens` 仅在 >0 时下发（0 = 不设帽，让推理模型先思考再作答）；
 //   - 不注入 response_format，JSON 由提示词约束。
 func (c *ChatClient) Complete(system, user string) (string, error) {
+	return c.CompleteWithRequestID(system, user, "")
+}
+
+// CompleteWithRequestID is Complete with an optional correlation header. The
+// header only labels the request for the operator-side logging relay; it is not
+// part of the prompt or the response, and the request body is unchanged.
+func (c *ChatClient) CompleteWithRequestID(system, user, requestID string) (string, error) {
 	payload := map[string]any{
 		"model": c.model,
 		"messages": []map[string]any{
@@ -132,7 +139,11 @@ func (c *ChatClient) Complete(system, user string) (string, error) {
 	} else {
 		payload["thinking"] = map[string]any{"type": "disabled"}
 	}
-	response, err := httpclient.PostJSON(c.url, payload, httpclient.Bearer(c.key), c.timeout, 2)
+	headers := httpclient.Bearer(c.key)
+	if id := strings.TrimSpace(requestID); id != "" {
+		headers["X-RM-Eval-Request-ID"] = id
+	}
+	response, err := httpclient.PostJSON(c.url, payload, headers, c.timeout, 2)
 	if err != nil {
 		return "", err
 	}
@@ -157,10 +168,16 @@ func (c *ChatClient) Complete(system, user string) (string, error) {
 // 调用方必须在最终失败时把该题记为 unscored 并写明原因，禁止把空答案静默判 0
 // （空答案不是「答错」，是「没答上」；计入分母会把读者能力与链路可靠性混为一谈）。
 func (c *ChatClient) CompleteWithRetry(system, user string) (string, error) {
+	return c.CompleteWithRetryRequestID(system, user, "")
+}
+
+// CompleteWithRetryRequestID is CompleteWithRetry with the logging correlation
+// header; retry semantics and the request body are unchanged.
+func (c *ChatClient) CompleteWithRetryRequestID(system, user, requestID string) (string, error) {
 	var lastErr error
 	wait := chatRetryBaseWait
 	for try := 1; try <= chatMaxAttempts; try++ {
-		text, err := c.Complete(system, user)
+		text, err := c.CompleteWithRequestID(system, user, requestID)
 		if err == nil {
 			return text, nil
 		}

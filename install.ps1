@@ -1,4 +1,4 @@
-# Copyright 2026 Rocareer & Rolling & PsychologyLake.org.cn
+﻿# Copyright 2026 Rocareer & Rolling & PsychologyLake.org.cn
 # Author: Albert <albert@rocareer.com>
 #
 # install.ps1 — One-line installer for Rolling-Memory on Windows (PowerShell).
@@ -7,6 +7,18 @@
 #   powershell -ExecutionPolicy Bypass -File install.ps1 [--with-hooks] [--with-instructions]
 #   irm https://github.com/rocareer/rolling-memory/raw/main/install.ps1 | iex
 $ErrorActionPreference = "Stop"
+
+# Windows PowerShell 5.1 compatibility (no pwsh 7 required). Suggested by
+# @Buyou27 in GitHub PR #2 and adopted here; the credited changelog entry is
+# in CHANGELOG.md.
+#   - the progress bar in Invoke-WebRequest slows large downloads down by an order of magnitude;
+#   - older Windows defaults to TLS 1.0/1.1, which GitHub rejects;
+#   - this file is UTF-8 with a BOM so 5.1 reads the non-ASCII diagnostics correctly.
+$ProgressPreference = "SilentlyContinue"
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+} catch {
+}
 
 $DefaultRepoUrl = "https://github.com/rocareer/rolling-memory.git"
 $DefaultReleaseBase = "https://github.com/rocareer/rolling-memory/releases/latest/download"
@@ -234,7 +246,7 @@ $InstallMeta = @{
     commit = $MetaCommit
     asset = $MetaAsset
     installed_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-} | ConvertTo-Json -Compress
+} | ConvertTo-Json -Compress -Depth 10
 [System.IO.File]::WriteAllText((Join-Path $DataDir "install.json"), $InstallMeta, (New-Object System.Text.UTF8Encoding($false)))
 Write-Host "[rolling-memory] Installed binary to $TargetBin (alias: $RmemCmd)"
 if (($env:PATH -split ';') -notcontains $InstallDir) {

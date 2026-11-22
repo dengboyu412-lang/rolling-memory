@@ -25,7 +25,7 @@ Rolling Memory 处于**高速、活跃演进期**（尚未发布 1.0）。本仓
 ```bash
 go build ./...
 go vet ./...
-gofmt -l .                                  # 必须无输出
+gofmt -l cmd internal sdk                     # 必须无输出
 go test ./... -count=1
 CGO_ENABLED=0 go build -trimpath ./cmd/rolling-memory   # 可移植性冒烟（纯 Go，无 CGO）
 ```
@@ -57,15 +57,17 @@ CGO_ENABLED=0 go build -trimpath ./cmd/rolling-memory   # 可移植性冒烟（�
 ```bash
 go build ./...                                # 1. 可编译
 go vet ./...                                  # 2. 静态检查
-gofmt -l .                                    # 3. 必须无输出
-go test ./... -count=1                        # 4. 单元 + 进程级 e2e
-go test -race ./internal/... -count=1          # 5. 引擎包的竞态检测
-go test ./internal/... -shuffle=on -count=2    # 6. 顺序无关（无测试间耦合）
+gofmt -l cmd internal sdk                     # 3. 必须无输出
+go test -short ./... -count=1                 # 4. 单元 + 进程级 e2e
+go test -short -race ./internal/... -count=1  # 5. 引擎包的竞态检测
+go test -short ./internal/... -shuffle=on -count=2  # 6. 顺序无关（无测试间耦合）
 # 7. 五目标交叉编译冒烟：全部发布目标均为纯 Go 构建
 for t in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64; do
   CGO_ENABLED=0 GOOS="${t%/*}" GOARCH="${t#*/}" go build -trimpath -o /dev/null ./cmd/rolling-memory || exit 1
 done
 ```
+
+公开工作流以相同的命令集运行，并统一带 `-short`。规模与性能测量夹具（用大型合成语料记录性能读数）是测量仪器而非正确性门禁，因此不进入 CI；评审性能改动时请去掉 `-short` 再跑一遍。
 
 - 测试只使用合成数据，默认隔离 HOME / XDG / DB 根——绝不指向真实记忆库，也绝不让新测试写出临时根之外。
 - 文档中引用的数字（场景数、文件数）来自夹具本身（`testdata/golden/vectors/`）；请先在那里更新。
@@ -76,6 +78,19 @@ done
 - 改动公共契约（工具 schema、回执形状、同步契约）时，须同步更新 `docs/` 下对应文档与 `CHANGELOG.md`。
 - 改动 schema 时须给出迁移策略（当前 schema 为 v1；谨慎对待存量 DB）。
 - 测试与示例中不得包含真实个人数据、API Key、对话记录或私有 URL。
+
+### 补丁如何被采纳，以及如何署名
+
+本仓库是发布快照，所以 PR **不能在这里直接合并**：合并会被下一次快照覆盖，且发布校验要求公仓树与导出树逐字节一致。因此补丁走**采纳**而非合并：
+
+- **只取最小可用子集。** 如果一个 PR 把修复与无关的格式重排混在一起，我们只采纳修复，丢掉重排——重排既让改动无法快速复核，也会与并行开发冲突。
+- **采纳内容在 `CHANGELOG.md` 的对应分类下署名**，写明你的账号与 PR 号，例如
+  `(Reported and suggested by @you in #123; adopted and rewritten in the source tree.)`。
+- **若你的提交内容基本原样落地，采纳提交会带 `Co-authored-by: 姓名 <邮箱>` 尾注**；若我们做了结构性重写（结构、命名或范围变化），则以变更日志致谢为署名，diff 不会与你的补丁一致。
+- **已按「已采纳」关闭的 PR 请不要重提精简版**：修复已在源码树里，再提一份只是重复劳动。
+- **不采纳的改动给理由，不沉默。** 如果前提不成立——例如为本来就正常的行为做兼容性重写——评审会明确说明。
+
+最容易合并的贡献形式是：针对我们发布的文件、单一关注点的小 diff（一个 bug 加它的测试，或一处文档修订）。
 
 ## 许可与签署
 

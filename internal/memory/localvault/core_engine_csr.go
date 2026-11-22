@@ -194,6 +194,34 @@ func (v *Vault) acquireCachedCSREngine(dbPath string) (*core.Engine, string, boo
 	return eng, genLine, true
 }
 
+// snapshotQueryWorker is one per-caller engine copy. Its query scratch carries
+// the day-cosine memo across the queries served by this worker. base pins the
+// exact engine the copy came from, so a derived engine rebuild (for example a
+// new noetic co-citation set) cannot be served by a stale copy.
+type snapshotQueryWorker struct {
+	eng  core.Engine
+	base *core.Engine
+}
+
+func (s *vaultCorpusSnapshot) acquireQueryWorker(eng *core.Engine) *snapshotQueryWorker {
+	if raw := s.coreWorkerPool.Get(); raw != nil {
+		w := raw.(*snapshotQueryWorker)
+		if w.base == eng && w.eng.Index == eng.Index {
+			return w
+		}
+	}
+	w := &snapshotQueryWorker{eng: *eng, base: eng}
+	w.eng.ResetScratch()
+	return w
+}
+
+func (s *vaultCorpusSnapshot) releaseQueryWorker(w *snapshotQueryWorker, eng *core.Engine) {
+	if w == nil || eng == nil || w.base != eng || w.eng.Index != eng.Index {
+		return
+	}
+	s.coreWorkerPool.Put(w)
+}
+
 // searchSnapshotCoreEngines 委托给 core.Engine 原生检索（含基线 .zcsr 与 core.Engine 内建的
 // Delta Overlay 自动融合与遮蔽）。
 func (s *vaultCorpusSnapshot) searchSnapshotCoreEngines(v *Vault, queryText string, queryPkt *BlindPulsePacket, topK int) []core.Hit {
@@ -230,15 +258,13 @@ func (s *vaultCorpusSnapshot) searchSnapshotCoreEngines(v *Vault, queryText stri
 		return searchCoreEngine(eng, v, queryText, queryPkt, topK)
 	}
 
-	// One Engine instance owns one query scratch. A shallow copy plus ResetScratch
-	// gives the caller its own, which is the contract the engine documents for
-	// parallel callers; the copied fields point at the same shared index and
-	// cluster state. Pooling the copies was measured on the same corpus and made
-	// no difference at 10k documents (3.09x vs 3.20x over eight callers), so the
-	// per-query allocation stays: the limit there is memory bandwidth, not GC.
-	worker := *eng
-	worker.ResetScratch()
-	return searchCoreEngine(&worker, v, queryText, queryPkt, topK)
+	// One Engine instance owns one query scratch. A per-caller copy gives that
+	// scratch its own day-cosine memo; pooling the copies keeps the memo warm
+	// across the queries served by the same caller instead of rebuilding it from
+	// zero every query.
+	worker := s.acquireQueryWorker(eng)
+	defer s.releaseQueryWorker(worker, eng)
+	return searchCoreEngine(&worker.eng, v, queryText, queryPkt, topK)
 }
 
 // searchCoreEngine runs one search on the given engine instance. It owns no

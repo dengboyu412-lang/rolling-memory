@@ -349,6 +349,7 @@ type LocalEngine struct {
 	coreQueryMu       sync.Mutex
 	coreEngine        *core.Engine
 	coreTermExtractor *plain.TermExtractor
+	coreWorkerPool    sync.Pool
 
 	localRecallMu             sync.Mutex
 	localRecallSurfaces       map[string]bool
@@ -1631,14 +1632,59 @@ func (e *LocalEngine) ensureCoreRMEngine() (*core.Engine, *plain.TermExtractor, 
 	return eng, te, nil
 }
 
+// queryCoreSnapshot runs one query on a per-caller engine copy. One Engine owns
+// one query scratch; the shallow copy plus ResetScratch keeps that contract while
+// the shared index and cluster state stay read-only.
+//
+// The shared engine must already be materialized (or disk-hydrated): the first
+// cluster-state build writes derived CSR fields onto Index.
+func queryCoreSnapshot(eng *core.Engine, az *plain.TermExtractor, query string, topK int) []core.Hit {
+	worker := *eng
+	worker.ResetScratch()
+	return worker.Query(az, query, topK)
+}
+
+type coreQueryWorker struct {
+	eng  core.Engine
+	base *core.Engine
+}
+
+func (e *LocalEngine) acquireCoreWorker(eng *core.Engine) *coreQueryWorker {
+	if raw := e.coreWorkerPool.Get(); raw != nil {
+		w := raw.(*coreQueryWorker)
+		if w.base == eng && w.eng.Index == eng.Index {
+			return w
+		}
+	}
+	w := &coreQueryWorker{eng: *eng, base: eng}
+	w.eng.ResetScratch()
+	return w
+}
+
+func (e *LocalEngine) releaseCoreWorker(w *coreQueryWorker, eng *core.Engine) {
+	if w == nil || eng == nil || w.base != eng || w.eng.Index != eng.Index {
+		return
+	}
+	e.coreWorkerPool.Put(w)
+}
+
+// queryCore runs one query on a pooled per-caller engine copy. Reusing the copy
+// keeps the query-local day-cosine memo warm across the questions served by the
+// same worker; the core bounds the memo and the index pointer check drops copies
+// from a previous generation.
+func (e *LocalEngine) queryCore(eng *core.Engine, az *plain.TermExtractor, query string, topK int) []core.Hit {
+	w := e.acquireCoreWorker(eng)
+	defer e.releaseCoreWorker(w, eng)
+	return w.eng.Query(az, query, topK)
+}
+
 func (e *LocalEngine) recallLocalPlaintext(ctx context.Context, query string, topK int) ([]local.ResolvedHit, error) {
 	if topK <= 0 {
 		topK = 10
 	}
 	if e.localIndexSurface() == LocalIndexSurfaceProduct {
 		if eng, az, zErr := e.ensureCoreRMEngine(); zErr == nil && eng != nil && az != nil {
-			e.coreQueryMu.Lock()
-			zHits := eng.Query(az, query, topK)
+			zHits := e.queryCore(eng, az, query, topK)
 			// 可选零交付臂：刚性空洞凭证 + 整查询实质词几乎全为零记载时物理 K=0。
 			if evalVoidFloorEnabled() && e.coreTermExtractor != nil && eng.Index != nil {
 				certs := e.coreTermExtractor.ArchiveVoidProbe(eng.Index, query)
@@ -1648,7 +1694,6 @@ func (e *LocalEngine) recallLocalPlaintext(ctx context.Context, query string, to
 					evalVoidFloorFired.Add(1)
 				}
 			}
-			e.coreQueryMu.Unlock()
 			out := make([]local.ResolvedHit, 0, len(zHits))
 			for _, zh := range zHits {
 				raw, dist, kept, lErr := e.Store.LoadLocalDocument(zh.UnitID)

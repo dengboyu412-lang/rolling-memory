@@ -26,7 +26,7 @@ Because the engine evolves quickly, APIs, file formats and behaviors may change 
 ```bash
 go build ./...
 go vet ./...
-gofmt -l .                                  # must print nothing
+gofmt -l cmd internal sdk                     # must print nothing
 go test ./... -count=1
 CGO_ENABLED=0 go build -trimpath ./cmd/rolling-memory   # portability smoke (pure Go, no CGO)
 ```
@@ -62,15 +62,17 @@ All commands run from the repo root and must be clean — this is the exact gate
 ```bash
 go build ./...                                # 1. compiles
 go vet ./...                                  # 2. static checks
-gofmt -l .                                    # 3. must print nothing
-go test ./... -count=1                        # 4. unit + internal/e2e (process level)
-go test -race ./internal/... -count=1         # 5. race detector over the engine packages
-go test ./internal/... -shuffle=on -count=2   # 6. order independence (no inter-test coupling)
+gofmt -l cmd internal sdk                     # 3. must print nothing
+go test -short ./... -count=1                 # 4. unit + internal/e2e (process level)
+go test -short -race ./internal/... -count=1  # 5. race detector over the engine packages
+go test -short ./internal/... -shuffle=on -count=2  # 6. order independence (no inter-test coupling)
 # 7. cross-compile smoke: all five release targets build from pure Go
 for t in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64; do
   CGO_ENABLED=0 GOOS="${t%/*}" GOARCH="${t#*/}" go build -trimpath -o /dev/null ./cmd/rolling-memory || exit 1
 done
 ```
+
+The public workflow runs the same suite with `-short`. The scale and profiling fixtures (large synthetic corpora used to record performance) are measurement instruments rather than correctness gates, and are intentionally left out of CI; run the commands without `-short` when you are reviewing a performance change.
 
 - Tests use synthetic data only, and isolate HOME / XDG / DB roots by default — never point a test at a real
   memory database, and never let a new test write outside its temporary root.
@@ -84,6 +86,29 @@ done
   `docs/` and `CHANGELOG.md`.
 - If you change the schema, add a migration strategy (the current schema is v1; treat existing DBs carefully).
 - Do not include real personal data, API keys, transcripts, or private URLs in tests or examples.
+
+### How patches are adopted, and how we credit them
+
+This repository is a release snapshot, so a PR cannot be merged here directly: a merge would be
+overwritten by the next snapshot, and the release verifier requires the public tree to match the
+exported source tree byte for byte. Patches are therefore **adopted**, not merged:
+
+- **We take the smallest working subset.** A PR that mixes a fix with unrelated reformatting is
+  adopted for the fix only; the reformatting is dropped, because it makes the change impossible to
+  verify quickly and collides with concurrent work.
+- **Adopted code is credited in `CHANGELOG.md`** under the matching category, with your handle and
+  the PR number — for example `(Reported and suggested by @you in #123; adopted and rewritten in
+  the source tree.)`.
+- **When your commit content lands close to verbatim, the adopting commit also carries a
+  `Co-authored-by: Name <email>` trailer.** When we rewrite it (different structure, naming or
+  scope), the changelog credit is the attribution and the diff will not match your patch.
+- **Please do not resubmit a trimmed patch after an adopted PR is closed.** The fix is already in
+  the source tree; a second patch only duplicates it.
+- **Rejected changes get a reason, not silence.** If the premise does not hold — for example a
+  compatibility rewrite for behaviour that already works — the review says so explicitly.
+
+The fastest path to a mergeable contribution is a small, single-concern diff against the files we
+ship: a bug with its test, or a documentation fix.
 
 ## License & sign-off
 

@@ -1,0 +1,73 @@
+name: PR adoption notice
+
+# The public repository is a release snapshot: patches are adopted into the
+# source tree and credited in CHANGELOG.md, never merged here. This workflow
+# only labels the PR and posts the policy once; it never checks out or runs
+# pull-request code (pull_request_target is used solely for the write token
+# that labels and comments on fork PRs need).
+
+on:
+  pull_request_target:
+    types: [opened, reopened]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  notice:
+    if: |
+      github.event.pull_request.author_association != 'OWNER' &&
+      github.event.pull_request.author_association != 'MEMBER' &&
+      github.event.pull_request.author_association != 'COLLABORATOR'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+
+            // 1) Label the PR so the release pre-flight can find it.
+            try {
+              await github.rest.issues.getLabel({ owner, repo, name: 'external' });
+            } catch (error) {
+              if (error.status !== 404) throw error;
+              await github.rest.issues.createLabel({
+                owner, repo,
+                name: 'external',
+                color: 'ededed',
+                description: 'Pull request from outside the maintainer team',
+              });
+            }
+            await github.rest.issues.addLabels({
+              owner, repo, issue_number, labels: ['external'],
+            });
+
+            // 2) Post the policy once. The marker keeps re-runs idempotent.
+            const marker = '<!-- pr-adoption-policy -->';
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number, per_page: 100,
+            });
+            if (comments.some((comment) => (comment.body || '').includes(marker))) return;
+
+            const body = `${marker}
+            Thanks for the patch!
+
+            **This repository is a release snapshot.** Pull requests are not merged here — a merge would be
+            replaced by the next snapshot. Patches are **adopted** into the source tree instead:
+
+            - we take the smallest working subset (a fix mixed with unrelated reformatting is adopted for the fix only);
+            - adopted work is credited in [\`CHANGELOG.md\`](https://github.com/rocareer/rolling-memory/blob/main/CHANGELOG.md) with your handle and the PR number, and the adopting commit carries \`Co-authored-by:\` when your content lands close to verbatim;
+            - once adopted, the PR is closed as *adopted upstream* and the fix ships in the next release.
+
+            Please keep the diff to one concern: a bug with its test, or a documentation fix. See
+            [\`CONTRIBUTING.md\`](https://github.com/rocareer/rolling-memory/blob/main/CONTRIBUTING.md) § “How patches are adopted, and how we credit them”.
+
+            （本仓库是发布快照，PR 不会被直接合并；补丁会被采纳进源码树并在 CHANGELOG 署名，详见 CONTRIBUTING.md。）`;
+
+            await github.rest.issues.createComment({
+              owner, repo, issue_number, body,
+            });
