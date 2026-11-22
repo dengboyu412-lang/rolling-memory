@@ -105,6 +105,26 @@ func (st *rmClusterState) rmProximityAndSynergy(c *rmCandidate, groups map[uint6
 	}
 	entries := st.docEntriesOf(c.unit)
 	n := len(c.matches)
+	// Resolve each match's position slice once. The pair loop would otherwise
+	// rebuild two slice headers per pair; the common single-entry match is also
+	// compared inline below instead of re-entering closestPackedSlot.
+	wide := st.hasWidePos()
+	var posBuf [16][]uint32
+	var pos [][]uint32
+	if n <= len(posBuf) {
+		pos = posBuf[:n]
+	} else {
+		pos = make([][]uint32, n)
+	}
+	for i := range c.matches {
+		m := &c.matches[i]
+		switch {
+		case len(m.positions) == 1:
+			pos[i] = st.entryPositionsOf(entries[m.positions[0]])
+		case len(m.positions) == 0 && m.entry >= 0:
+			pos[i] = st.entryPositionsOf(entries[m.entry])
+		}
+	}
 	var gwBuf [32]float64
 	var gws []float64
 	if n <= len(gwBuf) {
@@ -117,17 +137,30 @@ func (st *rmClusterState) rmProximityAndSynergy(c *rmCandidate, groups map[uint6
 	}
 	var prox, syn float64
 	for i := range c.matches {
-		a := c.matches[i]
+		a := &c.matches[i]
 		ma := gws[i]
 		for j := i + 1; j < n; j++ {
-			b := c.matches[j]
+			b := &c.matches[j]
 			mb := gws[j]
 			// Both pair channels are exactly zero when neither the group
 			// weights nor the two masses can contribute; skip the distance scan.
 			if ma+mb <= 0 && (a.mass <= 0 || b.mass <= 0) {
 				continue
 			}
-			closest := st.closestFamilySlot(entries, a, b)
+			var closest int
+			if !wide && len(pos[i]) == 1 && len(pos[j]) == 1 {
+				li, lj := pos[i][0], pos[j][0]
+				if li>>16 == lj>>16 {
+					closest = int(li&0xFFFF) - int(lj&0xFFFF)
+					if closest < 0 {
+						closest = -closest
+					}
+				} else {
+					closest = -1
+				}
+			} else {
+				closest = st.closestFamilySlot(entries, *a, *b)
+			}
 			if closest < 0 {
 				continue
 			}
@@ -209,13 +242,21 @@ func (st *rmClusterState) computeStructuredIncrement(idx *Index, sc *rmQueryScra
 		}
 	}
 	sc.matchedDG = matchedDG
+	// Membership is queried once per document entry and once per folded
+	// sentence group; a sorted slice with a binary probe keeps that scan
+	// logarithmic instead of quadratic in the matched-group count.
+	sortUint64Asc(matchedDG)
 	isMatchedDG := func(g uint64) bool {
-		for _, dg := range matchedDG {
-			if dg == g {
-				return true
+		lo, hi := 0, len(matchedDG)
+		for lo < hi {
+			mid := int(uint(lo+hi) >> 1)
+			if matchedDG[mid] < g {
+				lo = mid + 1
+			} else {
+				hi = mid
 			}
 		}
-		return false
+		return lo < len(matchedDG) && matchedDG[lo] == g
 	}
 
 	// Sentence-Support Pruning: mark sentences containing at least one matched

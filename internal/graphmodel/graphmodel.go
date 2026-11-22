@@ -209,24 +209,26 @@ type ClusterTypeCounts struct {
 
 // Stats is the graph HUD/statistics envelope.
 type Stats struct {
-	EventTotal           int               `json:"event_total"`
-	LinkTotal            int               `json:"link_total"`
-	NodeShown            int               `json:"node_shown"`
-	EdgeShown            int               `json:"edge_shown"`
-	IsolatedShown        int               `json:"isolated_shown"`
-	AvgEntityDegree      float64           `json:"avg_entity_degree"`
-	MultiEdgeEntityRatio float64           `json:"multi_edge_entity_ratio"`
-	AvgRelationReuse     float64           `json:"avg_relation_reuse"`
-	ObjectNodeRatio      float64           `json:"object_node_ratio"`
-	LayerNodeCounts      map[string]int    `json:"layer_node_counts,omitempty"`
-	WordTotal            int               `json:"word_total,omitempty"`
-	PhraseTotal          int               `json:"phrase_total,omitempty"`
-	ClusterTotal         int               `json:"cluster_total,omitempty"`
-	FreeUnitTotal        int               `json:"free_unit_total,omitempty"`
-	KindCounts           KindCounts        `json:"kind_counts"`
-	ClusterTypeCounts    ClusterTypeCounts `json:"cluster_type_counts"`
-	BuildMS              int64             `json:"build_ms,omitempty"`
-	LabelCoveragePct     float64           `json:"label_coverage_pct,omitempty"`
+	EventTotal             int               `json:"event_total"`
+	LinkTotal              int               `json:"link_total"`
+	NodeShown              int               `json:"node_shown"`
+	EdgeShown              int               `json:"edge_shown"`
+	IsolatedShown          int               `json:"isolated_shown"`
+	AvgEntityDegree        float64           `json:"avg_entity_degree"`
+	MultiEdgeEntityRatio   float64           `json:"multi_edge_entity_ratio"`
+	AvgRelationReuse       float64           `json:"avg_relation_reuse"`
+	ObjectNodeRatio        float64           `json:"object_node_ratio"`
+	LayerNodeCounts        map[string]int    `json:"layer_node_counts,omitempty"`
+	WordTotal              int               `json:"word_total,omitempty"`
+	PhraseTotal            int               `json:"phrase_total,omitempty"`
+	DisplayFilteredWords   int               `json:"display_filtered_words,omitempty"`
+	DisplayFilteredPhrases int               `json:"display_filtered_phrases,omitempty"`
+	ClusterTotal           int               `json:"cluster_total,omitempty"`
+	FreeUnitTotal          int               `json:"free_unit_total,omitempty"`
+	KindCounts             KindCounts        `json:"kind_counts"`
+	ClusterTypeCounts      ClusterTypeCounts `json:"cluster_type_counts"`
+	BuildMS                int64             `json:"build_ms,omitempty"`
+	LabelCoveragePct       float64           `json:"label_coverage_pct,omitempty"`
 }
 
 // Truncated reports whether the rendered view was capped.

@@ -79,6 +79,7 @@ func (b *Builder) View(ctx context.Context, req graphmodel.ViewRequest) (*graphm
 		termMass:       map[uint64]float64{},
 		wordAgg:        map[uint64]*wordAgg{},
 		phraseAgg:      map[phraseKey]*phraseAgg{},
+		backgroundDF:   backgroundDisplayLimit(snap),
 		wordBudget:     clampInt(limit, 64, maxWordsHard),
 		phraseBudget:   clampInt(limit/2, 32, maxPhrasesHard),
 		wordsPerUnit:   clampInt(limit/64, 2, 8),
@@ -94,6 +95,8 @@ func (b *Builder) View(ctx context.Context, req graphmodel.ViewRequest) (*graphm
 		scope = "mem:self"
 	}
 	stats := state.stats(nodes, edges, kindCounts, clusterTypeCounts)
+	stats.DisplayFilteredWords = state.filteredWords
+	stats.DisplayFilteredPhrases = state.filteredPhrases
 	stats.BuildMS = snap.BuildMS + time.Since(started).Milliseconds()
 	resp := &graphmodel.Response{
 		GraphSchemaVersion: graphmodel.GraphSchemaVersion,
@@ -142,6 +145,13 @@ type viewState struct {
 
 	wordAgg   map[uint64]*wordAgg
 	phraseAgg map[phraseKey]*phraseAgg
+
+	// Display projection: background word families and phrases with a
+	// background endpoint are recall keys, not consumer-facing labels. The
+	// aggregates above stay complete; only the rendered selection is filtered.
+	backgroundDF    int
+	filteredWords   int
+	filteredPhrases int
 
 	wordBudget     int
 	phraseBudget   int
@@ -1032,8 +1042,12 @@ func (s *viewState) includeClusterType(clusterType string) bool {
 func (s *viewState) selectPhrases() []phraseKey {
 	keys := make([]phraseKey, 0, len(s.phraseAgg))
 	for key := range s.phraseAgg {
+		if !s.displayablePhrase(key) {
+			continue
+		}
 		keys = append(keys, key)
 	}
+	s.filteredPhrases = len(s.phraseAgg) - len(keys)
 	sort.Slice(keys, func(i, j int) bool {
 		ai, aj := s.phraseAgg[keys[i]], s.phraseAgg[keys[j]]
 		if ai.binding != aj.binding {
@@ -1053,17 +1067,21 @@ func (s *viewState) selectPhrases() []phraseKey {
 func (s *viewState) selectWords(phraseKeys []phraseKey) []uint64 {
 	endpoint := map[uint64]struct{}{}
 	for _, key := range phraseKeys {
-		if group := s.termGroup(key.a); group != 0 {
+		if group := s.termGroup(key.a); group != 0 && s.displayableWord(group) {
 			endpoint[group] = struct{}{}
 		}
-		if group := s.termGroup(key.b); group != 0 {
+		if group := s.termGroup(key.b); group != 0 && s.displayableWord(group) {
 			endpoint[group] = struct{}{}
 		}
 	}
 	keys := make([]uint64, 0, len(s.wordAgg))
 	for group := range s.wordAgg {
+		if !s.displayableWord(group) {
+			continue
+		}
 		keys = append(keys, group)
 	}
+	s.filteredWords = len(s.wordAgg) - len(keys)
 	sort.Slice(keys, func(i, j int) bool {
 		ai, aj := s.wordAgg[keys[i]], s.wordAgg[keys[j]]
 		if ai.weight != aj.weight {
@@ -1104,7 +1122,7 @@ func (s *viewState) topClusterWords(weights map[uint64]float64, limit int) []gra
 	}
 	items := make([]item, 0, len(weights))
 	for group, weight := range weights {
-		if group == 0 || weight <= 0 {
+		if group == 0 || weight <= 0 || !s.displayableWord(group) {
 			continue
 		}
 		items = append(items, item{group: group, weight: weight})
@@ -1138,7 +1156,7 @@ func (s *viewState) topClusterPhrases(weights map[phraseKey]float64, limit int) 
 	}
 	items := make([]item, 0, len(weights))
 	for key, binding := range weights {
-		if binding <= 0 {
+		if binding <= 0 || !s.displayablePhrase(key) {
 			continue
 		}
 		items = append(items, item{key: key, binding: binding})
@@ -1176,6 +1194,31 @@ func (s *viewState) topClusterPhrases(weights map[phraseKey]float64, limit int) 
 		})
 	}
 	return out
+}
+
+// backgroundDisplayLimit returns the corpus background document-frequency
+// ceiling. Zero disables the display projection (no index available).
+func backgroundDisplayLimit(snap *Snapshot) int {
+	if snap == nil || snap.engine == nil || snap.engine.Index == nil {
+		return 0
+	}
+	return snap.engine.Index.HighDFThreshold()
+}
+
+// displayableWord reports whether a word family is a consumer-facing label:
+// it needs a primary surface and must not be corpus background.
+func (s *viewState) displayableWord(group uint64) bool {
+	if group == 0 || s.labels[group] == "" {
+		return false
+	}
+	if s.backgroundDF > 0 && termDF(s.snap, group) > s.backgroundDF {
+		return false
+	}
+	return true
+}
+
+func (s *viewState) displayablePhrase(key phraseKey) bool {
+	return s.displayableWord(s.termGroup(key.a)) && s.displayableWord(s.termGroup(key.b))
 }
 
 func (s *viewState) labelForGroup(group uint64) string {
