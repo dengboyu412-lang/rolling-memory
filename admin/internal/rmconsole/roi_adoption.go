@@ -1482,6 +1482,10 @@ func auditNoeticStreamAdoption(ctx context.Context, db *sql.DB, home, memoryPath
 						inferredHarness = "zcode"
 						break
 					}
+					if strings.HasPrefix(cu.StoredText, "@ref:opencode:") {
+						inferredHarness = "opencode"
+						break
+					}
 					if jp := extractJSONLPathFromPointer(cu.StoredText); jp != "" {
 						inferredHarness = inferHarnessIDFromJSONLPath(jp)
 						break

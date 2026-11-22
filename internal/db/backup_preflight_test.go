@@ -15,6 +15,15 @@ import (
 
 func TestBackupPreflightReportsExternalReferencesWithoutWriting(t *testing.T) {
 	dir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(dir, "home"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(dir, "xdg-data"))
+	opencodeStore := filepath.Join(dir, "xdg-data", "opencode", "opencode.db")
+	if err := os.MkdirAll(filepath.Dir(opencodeStore), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(opencodeStore, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	path := filepath.Join(dir, "memory?#.db")
 	connection, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: path}).String())
 	if err != nil {
@@ -42,6 +51,8 @@ func TestBackupPreflightReportsExternalReferencesWithoutWriting(t *testing.T) {
 		{"present", "@ref:jsonl:" + present + ":0#0"},
 		{"missing", "@ref:jsonl:" + missing + ":0#1"},
 		{"zcode", "@ref:zcode:s:m#0"},
+		{"opencode", "@ref:opencode:s:m#0"},
+		{"opencode-invalid", "@ref:opencode:bad"},
 		{"unknown", "@ref:other:opaque"},
 		{"invalid", "@ref:jsonl:bad"},
 		{"ordinary", "private text must not be returned"},
@@ -70,11 +81,12 @@ func TestBackupPreflightReportsExternalReferencesWithoutWriting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Complete || report.SelfContained || len(report.References) != 8 {
+	if report.Complete || report.SelfContained || len(report.References) != 10 {
 		t.Fatalf("report = %+v", report)
 	}
 	want := map[string]string{
 		"present": "path_present_unverified", "missing": "missing", "zcode": "missing",
+		"opencode": "path_present_unverified", "opencode-invalid": "invalid",
 		"unknown": "unsupported", "invalid": "invalid", missing: "missing",
 		"chunk": "path_present_unverified", "mount": "path_present_unverified",
 	}

@@ -549,7 +549,7 @@ func pruneLargeVaultHydrationCandidates(dbPath, home string, rows []map[string]a
 			out = append(out, r)
 			continue
 		}
-		// 仅匹配 id 与 address_uri（绝不匹配未水合的 @ref:zcode:/@ref:jsonl: 指针字面量，
+		// 仅匹配 id 与 address_uri（绝不匹配未水合的 @ref:zcode:/@ref:opencode:/@ref:jsonl: 指针字面量，
 		// 否则搜 "zcode" / "jsonl" / 路径名会把全库数万条指针全部送入同步水合）。
 		if kw != "" && strings.Contains(strings.ToLower(id+" "+addr), kw) {
 			uncachedKeep++

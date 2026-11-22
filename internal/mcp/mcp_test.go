@@ -878,17 +878,18 @@ func fastWatchdog(t *testing.T) {
 	t.Cleanup(func() { watchdogTick = previous })
 }
 
-func TestIdleExitRetiresAbandonedSession(t *testing.T) {
+func TestIdleSessionReleasesVaultHandleAndStaysAlive(t *testing.T) {
 	t.Setenv(debugEnv, "1")
+	fastWatchdog(t)
 	pipeReader, pipeWriter := io.Pipe()
 	var out, debug bytes.Buffer
 	retired := make(chan int, 1)
 	server := &Server{
-		In:       pipeReader,
-		Out:      &out,
-		Err:      &debug,
-		IdleExit: 120 * time.Millisecond,
-		exitFn:   func(code int) { retired <- code },
+		In:          pipeReader,
+		Out:         &out,
+		Err:         &debug,
+		IdleRelease: 120 * time.Millisecond,
+		exitFn:      func(code int) { retired <- code },
 	}
 	done := make(chan error, 1)
 	go func() { done <- server.Run() }()
@@ -897,37 +898,52 @@ func TestIdleExitRetiresAbandonedSession(t *testing.T) {
 	if _, err := pipeWriter.Write([]byte(request)); err != nil {
 		t.Fatalf("write: %v", err)
 	}
+	// Silence must release the handle, never end the session: hosts keep the
+	// pipe open and may report a clean process exit as a transport error.
 	select {
 	case code := <-retired:
-		if code != 0 {
-			t.Fatalf("exit code = %d, want 0", code)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatalf("watchdog never retired the idle session")
+		t.Fatalf("watchdog retired an idle session with code %d", code)
+	case <-time.After(600 * time.Millisecond):
 	}
-	if !strings.Contains(debug.String(), "input idle for 120ms") {
-		t.Fatalf("stderr = %q, want the idle reason", debug.String())
+	ping := `{"jsonrpc":"2.0","id":2,"method":"ping"}` + "\n"
+	if _, err := pipeWriter.Write([]byte(ping)); err != nil {
+		t.Fatalf("write after idle: %v", err)
 	}
-	// Closing the pipe ends Run; a self-retirement is not a transport error.
 	pipeWriter.Close()
 	if err := <-done; err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if strings.Count(out.String(), "\n") != 1 {
-		t.Fatalf("responses = %q, want the initialize reply only", out.String())
+	if got := strings.Count(out.String(), "\n"); got != 2 {
+		t.Fatalf("responses = %d, want 2 (initialize + ping)", got)
+	}
+	if strings.Contains(debug.String(), "exiting") {
+		t.Fatalf("stderr = %q, want no retirement", debug.String())
 	}
 }
 
-func TestIdleExitResetsOnActivity(t *testing.T) {
+func TestReleaseIdleDropsLazyHandle(t *testing.T) {
+	lazy := &LazyMemory{memory: newMemory(t)}
+	var inFlight atomic.Int64
+	server := &Server{}
+	if !server.releaseIdle(&inFlight, lazy) {
+		t.Fatalf("releaseIdle = false, want true")
+	}
+	if lazy.Opened() {
+		t.Fatalf("vault handle stayed open after idle release")
+	}
+}
+
+func TestIdleReleaseResetsOnActivity(t *testing.T) {
+	fastWatchdog(t)
 	pipeReader, pipeWriter := io.Pipe()
 	var out, debug bytes.Buffer
 	retired := make(chan int, 1)
 	server := &Server{
-		In:       pipeReader,
-		Out:      &out,
-		Err:      &debug,
-		IdleExit: 150 * time.Millisecond,
-		exitFn:   func(code int) { retired <- code },
+		In:          pipeReader,
+		Out:         &out,
+		Err:         &debug,
+		IdleRelease: 150 * time.Millisecond,
+		exitFn:      func(code int) { retired <- code },
 	}
 	done := make(chan error, 1)
 	go func() { done <- server.Run() }()
@@ -962,10 +978,10 @@ func TestOrphanRetiresSession(t *testing.T) {
 	retired := make(chan int, 1)
 	var ppidCalls atomic.Int64
 	server := &Server{
-		In:       pipeReader,
-		Out:      &out,
-		Err:      &debug,
-		IdleExit: -1, // isolate the orphan trigger
+		In:          pipeReader,
+		Out:         &out,
+		Err:         &debug,
+		IdleRelease: -1, // isolate the orphan trigger
 		ppidFn: func() int {
 			if ppidCalls.Add(1) == 1 {
 				return 1000 // birth: harness alive
@@ -1010,10 +1026,10 @@ func TestImageReplacementRetiresSession(t *testing.T) {
 	var out, debug bytes.Buffer
 	retired := make(chan int, 1)
 	server := &Server{
-		In:       pipeReader,
-		Out:      &out,
-		Err:      &debug,
-		IdleExit: -1, // isolate the stale-image trigger
+		In:          pipeReader,
+		Out:         &out,
+		Err:         &debug,
+		IdleRelease: -1, // isolate the stale-image trigger
 		statFn: func() (os.FileInfo, error) {
 			info, err := os.Stat(binary)
 			if err == nil {
@@ -1052,7 +1068,83 @@ func TestImageReplacementRetiresSession(t *testing.T) {
 	}
 }
 
-func TestIdleExitBudget(t *testing.T) {
+func TestDaemonProxySidecarIgnoresIdle(t *testing.T) {
+	fastWatchdog(t)
+	pipeReader, pipeWriter := io.Pipe()
+	var out, debug bytes.Buffer
+	retired := make(chan int, 1)
+	server := &Server{
+		In:            pipeReader,
+		Out:           &out,
+		Err:           &debug,
+		ProxyToDaemon: true,
+		IdleRelease:   100 * time.Millisecond,
+		exitFn:        func(code int) { retired <- code },
+	}
+	done := make(chan error, 1)
+	go func() { done <- server.Run() }()
+	// A sidecar that forwards to the shared daemon owns no vault handle: a
+	// quiet host connection must survive; only EOF or an orphan ends it.
+	select {
+	case code := <-retired:
+		t.Fatalf("watchdog retired a daemon-proxy sidecar with code %d", code)
+	case <-time.After(600 * time.Millisecond):
+	}
+	pipeWriter.Close()
+	if err := <-done; err != nil {
+		t.Fatalf("run: %v", err)
+	}
+}
+
+func TestDaemonProxySidecarIgnoresImageReplacement(t *testing.T) {
+	fastWatchdog(t)
+	binary := filepath.Join(t.TempDir(), "rolling-memory")
+	writeImage := func(content string) {
+		os.Remove(binary)
+		if err := os.WriteFile(binary, []byte(content), 0o755); err != nil {
+			t.Fatalf("write image: %v", err)
+		}
+	}
+	writeImage("build one")
+	statCalls := make(chan struct{}, 4)
+	pipeReader, pipeWriter := io.Pipe()
+	var out, debug bytes.Buffer
+	retired := make(chan int, 1)
+	server := &Server{
+		In:            pipeReader,
+		Out:           &out,
+		Err:           &debug,
+		ProxyToDaemon: true,
+		IdleRelease:   -1,
+		statFn: func() (os.FileInfo, error) {
+			statCalls <- struct{}{}
+			return os.Stat(binary)
+		},
+		exitFn: func(code int) { retired <- code },
+	}
+	done := make(chan error, 1)
+	go func() { done <- server.Run() }()
+	<-statCalls // the start image is pinned once
+	writeImage("build number two")
+	// The sidecar is stateless: a replaced build must not break the host
+	// connection. The shared daemon retires itself and restarts on demand.
+	select {
+	case code := <-retired:
+		t.Fatalf("watchdog retired a daemon-proxy sidecar with code %d", code)
+	case <-time.After(300 * time.Millisecond):
+	}
+	select {
+	case <-statCalls:
+		t.Fatalf("daemon-proxy sidecar kept probing the replaced image")
+	default:
+	}
+	pipeWriter.Close()
+	if err := <-done; err != nil {
+		t.Fatalf("run: %v", err)
+	}
+}
+
+func TestIdleReleaseBudget(t *testing.T) {
 	cases := []struct {
 		name  string
 		field time.Duration
@@ -1063,15 +1155,15 @@ func TestIdleExitBudget(t *testing.T) {
 		{"field positive", 5 * time.Minute, "", 5 * time.Minute},
 		{"env duration", 0, "90s", 90 * time.Second},
 		{"env zero disables", 0, "0", 0},
-		{"env garbage fails open", 0, "soon", defaultIdleExit},
-		{"unset defaults", 0, "", defaultIdleExit},
+		{"env garbage fails open", 0, "soon", defaultIdleRelease},
+		{"unset defaults", 0, "", defaultIdleRelease},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
-			t.Setenv(idleExitEnv, testCase.env)
-			server := &Server{IdleExit: testCase.field}
-			if got := server.idleExitBudget(); got != testCase.want {
-				t.Fatalf("idleExitBudget() = %v, want %v", got, testCase.want)
+			t.Setenv(idleReleaseEnv, testCase.env)
+			server := &Server{IdleRelease: testCase.field}
+			if got := server.idleReleaseBudget(); got != testCase.want {
+				t.Fatalf("idleReleaseBudget() = %v, want %v", got, testCase.want)
 			}
 		})
 	}

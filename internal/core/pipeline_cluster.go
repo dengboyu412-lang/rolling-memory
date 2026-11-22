@@ -40,6 +40,11 @@ func docRepeats(tf int32) float64 {
 	return 1
 }
 
+// proximityEntityDispatch is installed by the runtime adapter; nil keeps the
+// portable serial path. Candidates are independent: the dispatch writes only
+// candidates[u].entity, so parallel and serial paths are bit-identical.
+var proximityEntityDispatch func(units []int32, coreLex []float64, candidates []rmCandidate, gates []float64, st *rmClusterState, groups map[uint64]float64, total, residual float64)
+
 // bgMatch carries the already-computed query-side mass for a background term.
 // The anchor gate skips its posting scan (no candidate generation) and replays
 // the same match formula over the anchor candidates in a second phase.
@@ -1450,15 +1455,21 @@ func (e *Engine) searchClustersWithPositions(qTerms map[uint64]Term, qPositions 
 	sortInt32Asc(sc.dirtyUnits)
 
 	// 3. Intra-sentence pair compactness (residual proximity + pair synergy) and SpacetimeCluster peer corroboration.
+	if proximityEntityDispatch != nil {
+		proximityEntityDispatch(sc.dirtyUnits, coreLex, candidates, unitStructGate, st, groups, total, residual)
+	} else {
+		for _, u := range sc.dirtyUnits {
+			c := &candidates[u]
+			if len(c.matches) >= 2 && coreLex[u] > 0 {
+				gate := gateAt(unitStructGate, u)
+				prox, syn := st.rmProximityAndSynergy(c, groups, total)
+				c.entity += gate * (residual*prox + syn)
+			}
+		}
+	}
 	var peak float64
 	for _, u := range sc.dirtyUnits {
-		c := &candidates[u]
-		if len(c.matches) >= 2 && coreLex[u] > 0 {
-			gate := unitStructGate[u]
-			prox, syn := st.rmProximityAndSynergy(c, groups, total)
-			c.entity += gate * (residual*prox + syn)
-		}
-		if own := c.lex + c.phrase + c.entity; own > peak {
+		if own := candidates[u].lex + candidates[u].phrase + candidates[u].entity; own > peak {
 			peak = own
 		}
 	}

@@ -1249,7 +1249,8 @@ func (v *Vault) SaveLocalPlaintext(docID string, occurredAt int64, rawText strin
 	return nil
 }
 
-// SaveLocalEpisodicPointer stores ONLY a zero-copy pointer (`@ref:zcode:...` or `@ref:jsonl:...`)
+// SaveLocalEpisodicPointer stores ONLY a zero-copy pointer (`@ref:zcode:...`,
+// `@ref:opencode:...` or `@ref:jsonl:...`)
 // and the assigned memory address / carrier metadata in `rm_units`, without duplicating the
 // Harness's conversation plaintext into SQLite. `turnRef` records the provenance of the unit (a
 // content-addressed unit can be said in several turns; the row keeps one pointer, the lineage
@@ -1736,6 +1737,25 @@ func LoadEpisodicTurnSegmentsContext(ctx context.Context, turnRef string) ([]str
 		}
 		return renderEpisodicSegments(segments), nil
 	}
+	if strings.HasPrefix(trimmed, "@ref:opencode:") {
+		rest := strings.TrimPrefix(trimmed, "@ref:opencode:")
+		parts := strings.SplitN(rest, ":", 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return nil, fmt.Errorf("invalid opencode turn reference %q", turnRef)
+		}
+		odb, err := openOpenCodeReadOnly()
+		if err != nil {
+			return nil, err
+		}
+		segments, _, err := episodic.OpenCodeTurnSegmentsUpTo(odb, parts[0], parts[1], int(^uint(0)>>1))
+		if err != nil {
+			return nil, err
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return renderEpisodicSegments(segments), nil
+	}
 	return nil, fmt.Errorf("unsupported turn reference %q", turnRef)
 }
 
@@ -1752,13 +1772,15 @@ func renderEpisodicSegments(segments []episodic.Segment) []string {
 // from the underlying Harness database or JSONL transcript on disk.
 //
 // Three forms are valid:
-//   - `@ref:zcode:<session>:<msg_id>#<k>` / `@ref:jsonl:<abs_path>:<turn_idx>#<k>`
-//     names one speech segment (the L2 unit is a segment, not a whole turn);
+//   - `@ref:zcode:<session>:<msg_id>#<k>` / `@ref:opencode:<session>:<msg_id>#<k>`
+//     / `@ref:jsonl:<abs_path>:<turn_idx>#<k>` names one speech segment (the L2
+//     unit is a segment, not a whole turn);
 //   - `@ref:...#<k>.<c>` names chunk c of one segment: a long segment is split at
 //     sentence boundaries under the same tokenz-r budget the ingest used, so the
 //     split is deterministic and resolves to the chunk it was built from;
-//   - `@ref:zcode:<session>:<msg_id>` / `@ref:jsonl:<abs_path>:<turn_idx>` names
-//     the whole turn (legacy turn-level rows written before segment units).
+//   - `@ref:zcode:<session>:<msg_id>` / `@ref:opencode:<session>:<msg_id>` /
+//     `@ref:jsonl:<abs_path>:<turn_idx>` names the whole turn (legacy turn-level
+//     rows written before segment units).
 //
 // Segment enumeration is delegated to `internal/episodic`, the same package the
 // ingest scanner uses, so `#<k>` always resolves to the segment it was built from.
@@ -1800,6 +1822,18 @@ func ResolveEpisodicPointerLiveContext(ctx context.Context, refPointer string) (
 			return resolveJSONLSegmentLiveContext(ctx, absPath, turnStr, segmentIndex, chunkIndex, hasChunk)
 		}
 		return resolveJSONLTurnLiveContext(ctx, absPath, turnStr)
+	}
+	if strings.HasPrefix(trimmed, "@ref:opencode:") {
+		rest := strings.TrimPrefix(trimmed, "@ref:opencode:")
+		parts := strings.SplitN(rest, ":", 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return "", fmt.Errorf("invalid opencode pointer %q", refPointer)
+		}
+		msgID, segmentIndex, chunkIndex, hasSegment, hasChunk := splitPointerSegment(parts[1])
+		if hasSegment {
+			return resolveOpenCodeSegmentLive(parts[0], msgID, segmentIndex, chunkIndex, hasChunk)
+		}
+		return resolveOpenCodeTurnLive(parts[0], parts[1])
 	}
 	return trimmed, nil
 }
@@ -1876,6 +1910,58 @@ func openZCodeReadOnly() (*sql.DB, error) {
 		return nil, err
 	}
 	return zcodeReadHandle(zdbPath)
+}
+
+// openOpenCodeReadOnly resolves the shared read-only OpenCode session handle.
+// OpenCode keeps one SQLite store for every session, so pointer hydration reads
+// the same file the host is writing (through WAL) without copying it.
+func openOpenCodeReadOnly() (*sql.DB, error) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return nil, errors.New("localvault: cannot resolve user home directory")
+	}
+	path := harness.SessionStorePath(home, "opencode")
+	if path == "" {
+		return nil, errors.New("localvault: opencode session store not configured")
+	}
+	if _, err := os.Stat(path); err != nil {
+		return nil, err
+	}
+	return opencodeReadHandle(path)
+}
+
+// resolveOpenCodeSegmentLive hydrates one speech segment (or one chunk of it) of
+// an OpenCode turn.
+func resolveOpenCodeSegmentLive(sessionID, userMsgID string, segmentIndex, chunkIndex int, hasChunk bool) (string, error) {
+	odb, err := openOpenCodeReadOnly()
+	if err != nil {
+		return "", err
+	}
+	segments, _, err := episodic.OpenCodeTurnSegmentsUpTo(odb, sessionID, userMsgID, segmentIndex+1)
+	if err != nil {
+		return "", err
+	}
+	if segmentIndex >= len(segments) {
+		return "", fmt.Errorf("localvault: segment %d out of range for %s", segmentIndex, userMsgID)
+	}
+	rendered := episodicunit.Text(segments[segmentIndex].Role, segments[segmentIndex].Text)
+	return episodicSegmentChunk(rendered, segmentIndex, chunkIndex, hasChunk, userMsgID)
+}
+
+// resolveOpenCodeTurnLive renders a whole OpenCode turn for a turn-level pointer.
+func resolveOpenCodeTurnLive(sessionID, userMsgID string) (string, error) {
+	odb, err := openOpenCodeReadOnly()
+	if err != nil {
+		return "", err
+	}
+	segments, _, err := episodic.OpenCodeTurnSegmentsUpTo(odb, sessionID, userMsgID, int(^uint(0)>>1))
+	if err != nil {
+		return "", err
+	}
+	if len(segments) == 0 {
+		return "", errors.New("localvault: empty live opencode turn")
+	}
+	return strings.Join(renderEpisodicSegments(segments), "\n"), nil
 }
 
 func resolveJSONLSegmentLiveContext(ctx context.Context, absPath, turnStr string, segmentIndex, chunkIndex int, hasChunk bool) (string, error) {
@@ -2875,27 +2961,27 @@ func (v *Vault) SearchClientSDKDefault(queryText string, topK int) ([]QueryHit, 
 	return hits, nil
 }
 
-// zcodeReadHandle caches one read-only handle on the ZCode session store.
+// sqliteReadCache caches one read-only handle on a host session store.
 // Resolving a zero-copy pointer used to open (and close) a SQLite connection per
 // call: a multi-hundred-unit reconcile pass paid a schema read and a WAL index load
 // per pointer, which dominated the pass. The read-only handle is shared and has no
 // long-lived read transaction, so it does not hold a read mark between queries.
-var (
-	zcodeReadMu   sync.Mutex
-	zcodeReadPath string
-	zcodeReadInfo os.FileInfo
-	zcodeReadDB   *sql.DB
-)
+type sqliteReadCache struct {
+	mu   sync.Mutex
+	path string
+	info os.FileInfo
+	db   *sql.DB
+}
 
-func zcodeReadHandle(path string) (*sql.DB, error) {
+func (c *sqliteReadCache) handle(path string) (*sql.DB, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, err
 	}
-	zcodeReadMu.Lock()
-	defer zcodeReadMu.Unlock()
-	if zcodeReadDB != nil && zcodeReadPath == path && os.SameFile(zcodeReadInfo, info) {
-		return zcodeReadDB, nil
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.db != nil && c.path == path && os.SameFile(c.info, info) {
+		return c.db, nil
 	}
 	// Encode URI metacharacters and Windows drive paths before opening SQLite.
 	dsnPath := "file:" + path
@@ -2912,11 +2998,24 @@ func zcodeReadHandle(path string) (*sql.DB, error) {
 	handle.SetMaxIdleConns(2)
 	handle.SetConnMaxIdleTime(0)
 	handle.SetConnMaxLifetime(0)
-	if zcodeReadDB != nil {
-		_ = zcodeReadDB.Close()
+	if c.db != nil {
+		_ = c.db.Close()
 	}
-	zcodeReadPath, zcodeReadInfo, zcodeReadDB = path, info, handle
+	c.path, c.info, c.db = path, info, handle
 	return handle, nil
+}
+
+var (
+	zcodeReadCache    sqliteReadCache
+	opencodeReadCache sqliteReadCache
+)
+
+func zcodeReadHandle(path string) (*sql.DB, error) {
+	return zcodeReadCache.handle(path)
+}
+
+func opencodeReadHandle(path string) (*sql.DB, error) {
+	return opencodeReadCache.handle(path)
 }
 
 func resolveZCodeTurnLive(sessionID, userMsgID string) (string, error) {

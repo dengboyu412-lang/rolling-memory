@@ -8,7 +8,8 @@
 // is the wrong unit: one blob mixes heterogeneous topics and delivery has to slice
 // it arbitrarily). Enumeration is deterministic and is the single
 // source for both the ingest scanner and the zero-copy pointer resolver, so
-// `@ref:zcode:<session>:<msgid>#<k>` names the same segment on both sides.
+// `@ref:zcode:<session>:<msgid>#<k>` / `@ref:opencode:<session>:<msgid>#<k>`
+// names the same segment on both sides.
 //
 // Everything here is form-level: message roles, part types, sequence order. Text
 // cleaning (injected context removal) is delegated to `internal/speech`, which is

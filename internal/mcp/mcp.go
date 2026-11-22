@@ -1,18 +1,20 @@
 // Copyright 2026 Rocareer & Rolling & PsychologyLake.org.cn
 // Author: Albert <albert@rocareer.com>
 
-// Package mcp runs the stdio MCP server that exposes exactly two tools,
-// remember and recall.
+// Package mcp runs the stdio MCP server that exposes the single recall tool.
 //
 // The server owns stdout: every byte written there is one newline-delimited
 // JSON-RPC 2.0 message. Diagnostics only reach stderr when
 // ROLLING_MEMORY_MCP_DEBUG=1. The database opens lazily on the first tools/call,
 // so initialize and tools/list work without touching the store.
 //
-// Sessions also retire themselves: the process exits when the parent harness
-// is gone, when the image on disk no longer backs the running build, or when
-// input stays silent past ROLLING_MEMORY_MCP_IDLE_EXIT. stdio hosts respawn a
-// fresh server on the next call, so retirement is cleanup, not failure.
+// A session stays attached to the host: the process exits only when the parent
+// harness is gone, or when an in-process server's on-disk image no longer backs
+// the running build. Input silence past ROLLING_MEMORY_MCP_IDLE_RELEASE closes
+// the vault handle and lets the next tool call reopen it, because hosts keep a
+// quiet connection open and do not necessarily respawn a process that exits.
+// A daemon-proxy sidecar holds no vault, so neither silence nor a replaced
+// build retires it; the shared daemon owns upgrade retirement.
 //
 // Outbound objects are canonically encoded with sorted keys: standard preserves
 // dict insertion order, but ordered nesting is not part of the wire contract and
@@ -61,7 +63,7 @@ const (
 	defaultProtocolVersion  = protocolVersion20241105
 	serverName              = "rolling-memory"
 	debugEnv                = "ROLLING_MEMORY_MCP_DEBUG"
-	idleExitEnv             = "ROLLING_MEMORY_MCP_IDLE_EXIT"
+	idleReleaseEnv          = "ROLLING_MEMORY_MCP_IDLE_RELEASE"
 )
 
 // JSON-RPC error codes used by the adapter.
@@ -163,6 +165,15 @@ func (l *LazyMemory) Close() error {
 	return cur.Close()
 }
 
+// Opened reports whether a vault handle is currently open. The watchdog uses it
+// to tell a stateless daemon-proxy sidecar from a session that has touched the
+// vault itself.
+func (l *LazyMemory) Opened() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.memory != nil
+}
+
 // openMemory mirrors Memory() with no arguments: configuration from the
 // environment, then the store.
 func openMemory() (*facade.Memory, error) {
@@ -193,12 +204,13 @@ type Server struct {
 	Err    io.Writer // diagnostics, defaults to os.Stderr
 	Memory *facade.Memory
 	Lazy   *LazyMemory
-	// IdleExit bounds the input silence the session tolerates before it exits
-	// on its own; the host respawns the server on the next call. Zero falls
-	// back to ROLLING_MEMORY_MCP_IDLE_EXIT, then defaultIdleExit; a
-	// non-positive resolved budget disables idle exit. Orphan and
-	// stale-image retirement always run.
-	IdleExit time.Duration
+	// IdleRelease bounds the input silence a session tolerates before it closes
+	// the vault handle it opened; the stdio loop stays alive and the next call
+	// reopens the handle lazily. Zero falls back to
+	// ROLLING_MEMORY_MCP_IDLE_RELEASE, then defaultIdleRelease; a non-positive
+	// resolved budget disables the release. Orphan and stale-image retirement
+	// still run, except in a stateless daemon-proxy sidecar.
+	IdleRelease time.Duration
 	// ProxyToDaemon routes stdio `tools/call` requests through the shared local
 	// Unix domain socket daemon (`~/.local/state/rolling-memory/engine.sock`)
 	// when targeting the default primary vault, avoiding per-window 280MB corpus
@@ -221,8 +233,8 @@ type Server struct {
 // Run serves lines until EOF. It returns the first transport read/write error;
 // protocol failures stay inside the stream as JSON-RPC error responses.
 //
-// Run also arms the lifecycle watchdog, so the process leaves on its own when
-// it outlives its session instead of lingering on a pipe the host abandoned.
+// Run also arms the lifecycle watchdog, so an orphaned process leaves instead
+// of lingering on a pipe no host owns.
 func (s *Server) Run() error {
 	in := s.In
 	if in == nil {
@@ -384,13 +396,11 @@ func ServeAt(in io.Reader, out io.Writer, memory *facade.Memory, attachmentDir s
 	return (&Server{In: in, Out: out, Memory: memory, AttachmentDir: attachmentDir}).Run()
 }
 
-// Lifecycle knobs for the stdio daemon. Hosts keep abandoned connections open,
-// so sessions accumulate across reconnects; the watchdog retires them and the
-// host respawns a fresh process on the next call. The tick and deadline are
-// vars so tests can shrink them.
+// Lifecycle knobs for the stdio daemon. The tick and deadline are vars so
+// tests can shrink them.
 const (
-	defaultIdleExit = 30 * time.Minute
-	minWatchdogTick = 10 * time.Millisecond
+	defaultIdleRelease = 30 * time.Minute
+	minWatchdogTick    = 10 * time.Millisecond
 )
 
 var (
@@ -398,14 +408,17 @@ var (
 	shutdownDeadline = 2 * time.Second
 )
 
-// watchdog retires the process when it outlives its usefulness: the parent
-// harness is gone (orphan), the image on disk no longer backs this process
-// (a deploy replaced the build -- old semantics must not keep writing), or
-// input stayed silent past the idle budget (abandoned connection; hosts keep
-// the pipe open across reconnects). Orphan and stale-image retirement always
-// run; idle exit honors IdleExit.
+// watchdog keeps a live host connection alive. The parent harness going away
+// (orphan) still retires the process, and an in-process server still retires
+// when the image on disk no longer backs it (a deploy replaced the build --
+// old semantics must not keep writing). Input silence past the idle budget
+// releases the vault handle instead of exiting, because hosts keep a quiet
+// connection open and may report a clean process exit as a connection error
+// without respawning. A daemon-proxy sidecar is a stateless forwarder: it
+// holds no vault, and the shared daemon owns upgrade retirement, so neither
+// trigger applies.
 func (s *Server) watchdog(stop <-chan struct{}, activity *atomic.Int64, inFlight *atomic.Int64, lazy *LazyMemory) {
-	idle := s.idleExitBudget()
+	idle := s.idleReleaseBudget()
 	birthPPid := s.ppid()
 	startImage, hasImage := s.startImage()
 	tick := watchdogTick
@@ -427,33 +440,53 @@ func (s *Server) watchdog(stop <-chan struct{}, activity *atomic.Int64, inFlight
 			s.retire("parent harness exited", inFlight, lazy)
 			return
 		}
-		if hasImage {
+		stateless := s.ProxyToDaemon && s.Memory == nil && !lazy.Opened()
+		if hasImage && !stateless {
 			current, err := s.imageInfo()
 			if err != nil || imageReplaced(startImage, current) {
 				s.retire("running image was replaced on disk", inFlight, lazy)
 				return
 			}
 		}
-		if idle > 0 && time.Since(time.Unix(0, activity.Load())) >= idle {
-			s.retire("input idle for "+idle.String(), inFlight, lazy)
-			return
+		if idle > 0 && !stateless && time.Since(time.Unix(0, activity.Load())) >= idle {
+			if s.releaseIdle(inFlight, lazy) {
+				activity.Store(time.Now().UnixNano())
+			}
 		}
 	}
 }
 
-// idleExitBudget resolves the idle budget: the IdleExit field wins, then
-// ROLLING_MEMORY_MCP_IDLE_EXIT, then defaultIdleExit. A non-positive budget
-// disables idle exit. Unparseable values fail open to the default.
-func (s *Server) idleExitBudget() time.Duration {
-	if s.IdleExit != 0 {
-		return s.IdleExit
+// releaseIdle closes the vault handle this session opened and leaves the stdio
+// loop serving; the next tool call reopens it lazily. Caller-owned memory is
+// left alone because the embedder owns its lifecycle. It reports false when an
+// in-flight request kept the handle open, so the next tick retries.
+func (s *Server) releaseIdle(inFlight *atomic.Int64, lazy *LazyMemory) bool {
+	if s.Memory != nil || lazy == nil || !lazy.Opened() {
+		return true
 	}
-	if raw := strings.TrimSpace(os.Getenv(idleExitEnv)); raw != "" {
+	if !s.quiescent(inFlight) {
+		return false
+	}
+	_ = lazy.Close()
+	if os.Getenv(debugEnv) == "1" {
+		fmt.Fprintf(s.debugWriter(), "mcp: released idle vault handle\n")
+	}
+	return true
+}
+
+// idleReleaseBudget resolves the idle budget: the IdleRelease field wins, then
+// ROLLING_MEMORY_MCP_IDLE_RELEASE, then defaultIdleRelease. A non-positive
+// budget disables the release. Unparseable values fail open to the default.
+func (s *Server) idleReleaseBudget() time.Duration {
+	if s.IdleRelease != 0 {
+		return s.IdleRelease
+	}
+	if raw := strings.TrimSpace(os.Getenv(idleReleaseEnv)); raw != "" {
 		if parsed, err := time.ParseDuration(raw); err == nil {
 			return parsed
 		}
 	}
-	return defaultIdleExit
+	return defaultIdleRelease
 }
 
 // ppid reads the parent process id; tests replace ppidFn.
@@ -509,10 +542,10 @@ func (s *Server) quiescent(inFlight *atomic.Int64) bool {
 	return true
 }
 
-// retire closes the store best-effort and exits the process. stdio hosts
-// respawn a fresh server on the next call, so exiting is the cleanup. The
-// reason lands on stderr only under ROLLING_MEMORY_MCP_DEBUG=1, matching
-// debugTrace.
+// retire closes the store best-effort and exits the process. It backs the two
+// lifecycle events a session cannot survive in place: the parent harness is
+// gone, or an in-process server's build was replaced on disk. The reason lands
+// on stderr only under ROLLING_MEMORY_MCP_DEBUG=1, matching debugTrace.
 func (s *Server) retire(reason string, inFlight *atomic.Int64, lazy *LazyMemory) {
 	s.quiescent(inFlight)
 	if os.Getenv(debugEnv) == "1" {

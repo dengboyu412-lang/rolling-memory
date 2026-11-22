@@ -154,7 +154,7 @@ func (v *Vault) BackfillEpisodicIndexes(ctx context.Context, scope, cursor strin
 			}
 		}
 
-		if !strings.HasPrefix(ref.pointer, "@ref:jsonl:") && !strings.HasPrefix(ref.pointer, "@ref:zcode:") {
+		if !strings.HasPrefix(ref.pointer, "@ref:jsonl:") && !strings.HasPrefix(ref.pointer, "@ref:zcode:") && !strings.HasPrefix(ref.pointer, "@ref:opencode:") {
 			report.Unavailable++
 		} else if text, err := resolveCached(ref.pointer); err != nil || strings.TrimSpace(text) == "" {
 			if ctxErr := ctx.Err(); ctxErr != nil {

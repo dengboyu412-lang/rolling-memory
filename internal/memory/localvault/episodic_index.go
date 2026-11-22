@@ -628,6 +628,23 @@ func episodicPointerTurnSegmentsContext(ctx context.Context, refPointer string) 
 		}
 		return episodic.JSONLTurnSegmentsContext(ctx, rest[:lastColon], turnIndex)
 	}
+	if strings.HasPrefix(trimmed, "@ref:opencode:") {
+		rest := strings.TrimPrefix(trimmed, "@ref:opencode:")
+		parts := strings.SplitN(rest, ":", 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return nil, fmt.Errorf("localvault: invalid opencode pointer %q", refPointer)
+		}
+		msgID := parts[1]
+		if idx := strings.LastIndex(msgID, "#"); idx > 0 {
+			msgID = msgID[:idx]
+		}
+		odb, err := openOpenCodeReadOnly()
+		if err != nil {
+			return nil, err
+		}
+		segments, _, err := episodic.OpenCodeTurnSegmentsUpTo(odb, parts[0], msgID, int(^uint(0)>>1))
+		return segments, err
+	}
 	return nil, fmt.Errorf("localvault: unsupported episodic pointer %q", refPointer)
 }
 

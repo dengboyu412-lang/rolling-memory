@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/rocareer/rolling-memory/internal/harness"
 	"github.com/rocareer/rolling-memory/internal/ids"
 )
 
@@ -140,6 +141,18 @@ func inspectBackupReference(kind, id, ref, zcodePath string) BackupReference {
 				return entry
 			}
 			path = rest[:index]
+		case strings.HasPrefix(ref, "@ref:opencode:"):
+			parts := strings.SplitN(strings.TrimPrefix(ref, "@ref:opencode:"), ":", 2)
+			if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+				entry.Status = "invalid"
+				return entry
+			}
+			home, err := os.UserHomeDir()
+			if err != nil || home == "" {
+				entry.Status = "unavailable"
+				return entry
+			}
+			path = harness.SessionStorePath(home, "opencode")
 		default:
 			entry.Status = "unsupported"
 			return entry

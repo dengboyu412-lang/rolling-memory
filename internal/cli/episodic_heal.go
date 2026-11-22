@@ -39,6 +39,9 @@ func sameEpisodicSourceSession(a, b string) bool {
 	case strings.HasPrefix(a, "@ref:zcode:") && strings.HasPrefix(b, "@ref:zcode:"):
 		sessionA, sessionB := zcodePointerSession(a), zcodePointerSession(b)
 		return sessionA != "" && sessionA == sessionB
+	case strings.HasPrefix(a, "@ref:opencode:") && strings.HasPrefix(b, "@ref:opencode:"):
+		sessionA, sessionB := opencodePointerSession(a), opencodePointerSession(b)
+		return sessionA != "" && sessionA == sessionB
 	default:
 		return false
 	}
@@ -59,6 +62,16 @@ func jsonlPointerSourceFile(pointer string) string {
 // zcodePointerSession 提取 `@ref:zcode:<session>:<message>#<seg>` 的会话部分。
 func zcodePointerSession(pointer string) string {
 	rest := strings.TrimPrefix(strings.TrimSpace(pointer), "@ref:zcode:")
+	parts := strings.SplitN(rest, ":", 2)
+	if len(parts) != 2 {
+		return ""
+	}
+	return parts[0]
+}
+
+// opencodePointerSession 提取 `@ref:opencode:<session>:<message>#<seg>` 的会话部分。
+func opencodePointerSession(pointer string) string {
+	rest := strings.TrimPrefix(strings.TrimSpace(pointer), "@ref:opencode:")
 	parts := strings.SplitN(rest, ":", 2)
 	if len(parts) != 2 {
 		return ""

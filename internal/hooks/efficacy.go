@@ -86,7 +86,7 @@ func recordHookObservation(cfg *config.Config, event string, payload map[string]
 		entry.TextBytes = &length
 		entry.Observation = "observed"
 	}
-	ledger, err := efficacy.OpenBoundLedger(path, fp)
+	ledger, err := efficacy.OpenBoundLedger(path, fp, efficacy.ComputeLegacyDBFingerprintFromPath(cfg.DB))
 	if err != nil {
 		return
 	}

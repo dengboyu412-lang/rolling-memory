@@ -16,11 +16,11 @@ func SessionsScannable(harnessID string) bool {
 // TurnsScannable reports whether the transcript reader can also extract turn
 // content. A host whose transcript is compressed or uses an unsupported schema
 // counts sessions but reports zero turns; the panel labels that as "not
-// counted" rather than "no history". OpenCode exposes a session inventory only,
-// so it stays out of the turn list.
+// counted" rather than "no history". OpenCode is read from its SQLite session
+// store (`session_v2` / `session_message`), so its turns are importable.
 func TurnsScannable(harnessID string) bool {
 	switch harnessID {
-	case "zcode", "claude-code", "codex", "dsh", "codebuddy", "workbuddy", "doubao":
+	case "zcode", "claude-code", "codex", "dsh", "codebuddy", "workbuddy", "opencode", "doubao":
 		return true
 	}
 	return false

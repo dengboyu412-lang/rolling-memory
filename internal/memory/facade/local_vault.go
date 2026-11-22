@@ -1914,15 +1914,22 @@ func pushNoeticPulse(tc *localvault.Client, noeticID, query, answer string, cite
 	}
 }
 
-// episodicTurnSessionKey extracts the session stem (`@ref:zcode:<session>` or
-// `@ref:jsonl:<path>`) from a turn reference so consecutive turns inside the same
-// conversation stream can be ordered with recency supersession.
+// episodicTurnSessionKey extracts the session stem (`@ref:zcode:<session>`,
+// `@ref:opencode:<session>` or `@ref:jsonl:<path>`) from a turn reference so
+// consecutive turns inside the same conversation stream can be ordered with
+// recency supersession.
 func episodicTurnSessionKey(ref string) string {
 	trimmed := strings.TrimSpace(ref)
 	if strings.HasPrefix(trimmed, "@ref:zcode:") {
 		rest := strings.TrimPrefix(trimmed, "@ref:zcode:")
 		if colon := strings.IndexByte(rest, ':'); colon > 0 {
 			return "@ref:zcode:" + rest[:colon]
+		}
+	}
+	if strings.HasPrefix(trimmed, "@ref:opencode:") {
+		rest := strings.TrimPrefix(trimmed, "@ref:opencode:")
+		if colon := strings.IndexByte(rest, ':'); colon > 0 {
+			return "@ref:opencode:" + rest[:colon]
 		}
 	}
 	if strings.HasPrefix(trimmed, "@ref:jsonl:") {

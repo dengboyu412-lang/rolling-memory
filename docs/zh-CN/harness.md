@@ -105,7 +105,7 @@ rolling-memory mcp --http --addr 127.0.0.1:9000 --path /mcp  # 需要换端口 /
 
 ### 4.5 对话采集范围与手工导入
 
-安装 MCP 服务或技能与采集对话历史是两件事。后台扫描器读取 ZCode 的本地会话数据库，以及 ZCode、Claude Code、Codex、DSH、CodeBuddy 和 WorkBuddy 的部分转录文件位置。它支持 Codex 的 `.jsonl.zst` 归档，以及已观察到的 v4 格式 DSH 压缩 `.jsonl.zstd` 会话：用户消息须具有 `source.kind: user`，只有匹配的 `turn/start` 与 `turn/end` 事件确认成功完成（`reason.kind: completed`）的轮次才会导入。未知格式和无法确认成功完成的轮次不导入；不保证覆盖子代理对话。CodeBuddy 和 WorkBuddy 的预设 JSONL 位置可能与宿主实际存储不一致。OpenCode、Cursor、Windsurf、Cline 没有自动对话扫描器。豆包不直接读取应用内加密的实时存储；放到 `~/Doubao/exports/` 的本地 JSONL 对话导出（每个会话一个文件）会按同一套完成语义导入。已安装且受宿主支持的钩子也不能保证这些来源完整。
+安装 MCP 服务或技能与采集对话历史是两件事。后台扫描器读取 ZCode 与 OpenCode 的本地会话数据库，以及 ZCode、Claude Code、Codex、DSH、CodeBuddy 和 WorkBuddy 的部分转录文件位置。OpenCode 的存储按 SQLite 读取：当前版本把会话放在 `session_v2`、消息放在 `session_message`，旧版本只有用于清点会话的 `session`。只有最后一个助手步骤已完成、未报错且未调用工具的轮次才会导入；调用工具的助手步骤属于过程旁白，不进入记忆。它支持 Codex 的 `.jsonl.zst` 归档，以及已观察到的 v4 格式 DSH 压缩 `.jsonl.zstd` 会话：用户消息须具有 `source.kind: user`，只有匹配的 `turn/start` 与 `turn/end` 事件确认成功完成（`reason.kind: completed`）的轮次才会导入。未知格式和无法确认成功完成的轮次不导入；不保证覆盖子代理对话。CodeBuddy 和 WorkBuddy 的预设 JSONL 位置可能与宿主实际存储不一致。Cursor、Windsurf、Cline 没有自动对话扫描器。豆包不直接读取应用内加密的实时存储；放到 `~/Doubao/exports/` 的本地 JSONL 对话导出（每个会话一个文件）会按同一套完成语义导入。已安装且受宿主支持的钩子也不能保证这些来源完整。
 
 其他来源可导出或准备受支持的 JSONL 对话文件，用 `rolling-memory import /path/to/transcript` 手工导入并检查结果。文件导入仅接受 `shared` 或 `public` 受众；由于后台扫描无法执行文件级访问控制，受限或未知受众会被拒绝。请勿将敏感文件放入扫描目录；已有副本不会自动删除。手工导入和后台扫描均不保证完整或无损采集。工具契约见 [mcp.md](mcp.md)。检索与存储使用本地明文 `local_plain`；安装或更新软件是单独的操作，可能需要联网。
 

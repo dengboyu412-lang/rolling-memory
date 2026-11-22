@@ -193,6 +193,63 @@ func discoverEpisodicScanSources(ctx context.Context, home, harnessID string) ([
 			}
 		}
 	}
+	if harnessID == "opencode" {
+		path := harness.SessionStorePath(home, harnessID)
+		if _, err := os.Stat(path); err != nil {
+			if !os.IsNotExist(err) {
+				return nil, err
+			}
+		} else {
+			db, err := sql.Open("sqlite", ids.SQLiteFileURI(path)+"?mode=ro&_pragma=busy_timeout(1500)")
+			if err != nil {
+				return nil, err
+			}
+			// Current OpenCode versions keep the working store in `session_v2`;
+			// older stores only have `session`. Both carry the conversation id,
+			// workspace directory and last write, so inventory stays readable
+			// across the schema split. Turn content is read from
+			// `session_message`, which the older schema does not have.
+			query := `SELECT id, COALESCE(directory, ''), COALESCE(time_updated, 0) FROM session_v2
+				WHERE COALESCE(parent_id, '') = '' AND COALESCE(time_archived, 0) = 0 ORDER BY id`
+			rows, err := db.QueryContext(ctx, query)
+			if err != nil && strings.Contains(strings.ToLower(err.Error()), "no such table") {
+				rows, err = db.QueryContext(ctx, `SELECT id, COALESCE(directory, ''), COALESCE(time_updated, 0) FROM session ORDER BY id`)
+				if err != nil && strings.Contains(strings.ToLower(err.Error()), "no such column") {
+					rows, err = db.QueryContext(ctx, `SELECT id, '', COALESCE(time_updated, 0) FROM session ORDER BY id`)
+				}
+			}
+			if err != nil {
+				_ = db.Close()
+				return nil, err
+			}
+			for rows.Next() {
+				var session, dir string
+				var updated int64
+				if scanErr := rows.Scan(&session, &dir, &updated); scanErr != nil {
+					_ = rows.Close()
+					_ = db.Close()
+					return nil, scanErr
+				}
+				if updated > 0 {
+					updated = updated / 1000
+				}
+				sources = append(sources, episodicScanSource{
+					HarnessID:    harnessID,
+					Kind:         "opencode",
+					Path:         path,
+					SessionID:    session,
+					RawDir:       dir,
+					LastActivity: updated,
+				})
+			}
+			err = rows.Err()
+			_ = rows.Close()
+			_ = db.Close()
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
 	sort.Slice(sources, func(i, j int) bool { return sources[i].key() < sources[j].key() })
 	return sources, nil
 }
@@ -243,7 +300,7 @@ func episodicScanSourceStamp(source episodicScanSource) (string, error) {
 		return "", err
 	}
 	stamp := fmt.Sprintf("%d:%d", info.ModTime().UnixNano(), info.Size())
-	if source.Kind == "zcode" {
+	if episodicSQLiteSource(source.Kind) {
 		wal, err := os.Stat(source.Path + "-wal")
 		if err == nil {
 			stamp += fmt.Sprintf(":%d:%d", wal.ModTime().UnixNano(), wal.Size())
@@ -312,6 +369,11 @@ func streamEpisodicScanSourceFrom(ctx context.Context, source episodicScanSource
 				source.Locus = facade.ResolveWorkspaceLocus(source.RawDir)
 				source.LocusKnown = true
 			}
+		case "opencode":
+			if filepath.IsAbs(source.RawDir) {
+				source.Locus = facade.ResolveWorkspaceLocus(source.RawDir)
+				source.LocusKnown = true
+			}
 		}
 	}
 	idx := 0
@@ -375,6 +437,59 @@ func streamEpisodicScanSourceFrom(ctx context.Context, source episodicScanSource
 			return nil
 		})
 		return idx, err
+	case "opencode":
+		db, err := sql.Open("sqlite", ids.SQLiteFileURI(source.Path)+"?mode=ro&_pragma=busy_timeout(1500)")
+		if err != nil {
+			return 0, err
+		}
+		defer db.Close()
+		turns, err := episodic.OpenCodeSessionTurns(db, source.SessionID)
+		if err != nil {
+			// An older store has no `session_message` table. Inventory still
+			// works there, so an absent turn stream is "no turns", not a failed
+			// source.
+			if strings.Contains(strings.ToLower(err.Error()), "no such table") {
+				return 0, nil
+			}
+			return 0, err
+		}
+		expectedPrefix := "@ref:opencode:" + source.SessionID + ":"
+		resumeUserMsgID := ""
+		if startTurnIdx > 0 && strings.HasPrefix(startTurnRef, expectedPrefix) {
+			candidate := strings.TrimPrefix(startTurnRef, expectedPrefix)
+			if ampersand := strings.LastIndex(candidate, "#"); ampersand > 0 {
+				candidate = candidate[:ampersand]
+			}
+			for _, turn := range turns {
+				if turn.UserMsgID == candidate {
+					resumeUserMsgID = candidate
+					idx = startTurnIdx
+					break
+				}
+			}
+		}
+		started := resumeUserMsgID == ""
+		for _, turn := range turns {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return idx, ctxErr
+			}
+			if !started {
+				if turn.UserMsgID != resumeUserMsgID {
+					continue
+				}
+				started = true
+			}
+			prefix := fmt.Sprintf("@ref:opencode:%s:%s", source.SessionID, turn.UserMsgID)
+			turnStart := idx
+			for _, segment := range turn.Segments {
+				var emitErr error
+				idx, emitErr = emitEpisodicScanSegmentUnits(ctx, source, scope, prefix, turnStart, idx, segment, turn.OccurredAt, turn.Completed, visit)
+				if emitErr != nil {
+					return idx, emitErr
+				}
+			}
+		}
+		return idx, nil
 	default:
 		return 0, fmt.Errorf("unknown episodic source %q", source.Kind)
 	}
@@ -852,7 +967,7 @@ func visitEpisodicSourcePages(ctx context.Context, sources []episodicScanSource,
 		if key == cursor.Source && cursor.Index > 0 {
 			start = cursor.Index
 			grew = cursor.Grew
-			if stamp != cursor.Stamp && cursor.Stamp != "" && source.Kind != "zcode" {
+			if stamp != cursor.Stamp && cursor.Stamp != "" && !episodicSQLiteSource(source.Kind) {
 				var anchorMatched bool
 				cnt, sErr := episodicScanUnits(ctx, source, scope, snapshot, "", 0, func(i int, _ int, turn candidateEpisodicTurn) error {
 					if i == start-1 {
@@ -987,7 +1102,7 @@ func visitEpisodicSourcePages(ctx context.Context, sources []episodicScanSource,
 			hadSourceErr = true
 			continue
 		}
-		if after != stamp && source.Kind != "zcode" {
+		if after != stamp && !episodicSQLiteSource(source.Kind) {
 			cursor.RetrySources = true
 			return cursor, true, errors.Join(sourceErr, fmt.Errorf("episodic source changed during scan: %s", source.Path))
 		}

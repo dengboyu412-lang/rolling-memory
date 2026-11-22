@@ -381,10 +381,128 @@ func TestSyncStatusUnsupportedHostIsKnownScope(t *testing.T) {
 	}
 }
 
-// TestSyncStatusOpenCodeInventoryHasNoTurnClaims locks the split capability for
-// OpenCode: sessions can be counted, but this build has no turn reader, so the
-// item must not claim turn coverage or fabricate a 0/0 pending count.
-func TestSyncStatusOpenCodeInventoryHasNoTurnClaims(t *testing.T) {
+// TestSyncStatusOpenCodeReadsSessionV2 locks the OpenCode reader: the current
+// store (session_v2 / session_message) drives the inventory and the turn counts,
+// archived sessions and subagent sessions stay out of the main inventory, and a
+// turn without a successful idle event is reported as incomplete instead of
+// being counted as importable work.
+func TestSyncStatusOpenCodeReadsSessionV2(t *testing.T) {
+	env := newEnv(t)
+	configDir := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "opencode")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(os.Getenv("XDG_DATA_HOME"), "opencode", "opencode.db")
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE session_v2 (
+			id TEXT PRIMARY KEY, project_id TEXT, parent_id TEXT, slug TEXT,
+			directory TEXT, version TEXT, time_created INTEGER, time_updated INTEGER, time_archived INTEGER
+		);
+		CREATE TABLE session_message (
+			id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER,
+			time_created INTEGER, time_updated INTEGER, data TEXT
+		);
+		INSERT INTO session_v2 VALUES ('s1', 'p1', '', 's1', '/tmp/opencode-workspace', '1', 0, 1700000002000, 0);
+		INSERT INTO session_v2 VALUES ('s2', 'p1', '', 's2', '/tmp/opencode-workspace', '1', 0, 1699999000000, 1);
+		INSERT INTO session_v2 VALUES ('s3', 'p1', 's1', 's3', '/tmp/opencode-workspace', '1', 0, 1700000001000, 0);
+		INSERT INTO session_message VALUES ('m1', 's1', 'user', 1, 1700000000000, 1700000000000, '{"text":"opencode 扫描问题"}');
+		INSERT INTO session_message VALUES ('m2', 's1', 'assistant', 2, 1700000000050, 1700000001000, '{"content":[{"type":"reasoning","text":"thinking"},{"type":"text","text":"opencode 扫描回答"}],"time":{"created":1700000000050,"completed":1700000001000}}');
+		INSERT INTO session_message VALUES ('m3', 's1', 'idle', 3, 1700000001000, 1700000001000, '{"outcome":"succeeded"}');
+		INSERT INTO session_message VALUES ('m4', 's1', 'user', 4, 1700000001500, 1700000001500, '{"text":"第二轮提问"}');
+		INSERT INTO session_message VALUES ('m5', 's1', 'assistant', 5, 1700000001600, 1700000001700, '{"content":[{"type":"text","text":"第二轮回答"}],"time":{"created":1700000001600,"completed":1700000001700}}');
+		INSERT INTO session_message VALUES ('m6', 's1', 'idle', 6, 1700000001700, 1700000001700, '{"outcome":"interrupted"}');
+	`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	payload := runStatusJSON(t, filepath.Join(env.base, "opencode.db"))
+	item := harnessItem(t, payload, "opencode")
+	if item["sessions_scan_supported"] != true || item["turns_scan_supported"] != true ||
+		item["sessions_count"] != float64(1) ||
+		item["local_turns_count"] != float64(2) || item["unsynced_turns_count"] != float64(2) ||
+		item["incomplete_turns_count"] != float64(2) ||
+		item["excluded_subagent_sources_count"] != float64(1) ||
+		item["last_active_at"] != float64(1700000002) {
+		t.Fatalf("opencode item = %+v", item)
+	}
+	layer := payload["layers"].(map[string]any)["episodic"].(map[string]any)
+	if layer["alignment_known"] != true || layer["aligned"] != false {
+		t.Fatalf("opencode pending window = %+v", layer)
+	}
+}
+
+// TestSyncReconcileImportsOpenCodeTurns locks the end-to-end import: a completed
+// OpenCode turn is written as zero-copy pointers, and the same store then reports
+// it as synced. The live pointer resolver reads the same segment enumeration, so
+// recall hydration sees the host text without a copied transcript.
+func TestSyncReconcileImportsOpenCodeTurns(t *testing.T) {
+	env := newEnv(t)
+	configDir := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "opencode")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(os.Getenv("XDG_DATA_HOME"), "opencode", "opencode.db")
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE session_v2 (
+			id TEXT PRIMARY KEY, project_id TEXT, parent_id TEXT, slug TEXT,
+			directory TEXT, version TEXT, time_created INTEGER, time_updated INTEGER, time_archived INTEGER
+		);
+		CREATE TABLE session_message (
+			id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER,
+			time_created INTEGER, time_updated INTEGER, data TEXT
+		);
+		INSERT INTO session_v2 VALUES ('s1', 'p1', '', 's1', '/tmp/opencode-workspace', '1', 0, 1700000001000, 0);
+		INSERT INTO session_message VALUES ('m1', 's1', 'user', 1, 1700000000000, 1700000000000, '{"text":"opencode 记忆导入"}');
+		INSERT INTO session_message VALUES ('m2', 's1', 'assistant', 2, 1700000000100, 1700000001000, '{"content":[{"type":"text","text":"opencode 导入回答"}],"time":{"created":1700000000100,"completed":1700000001000}}');
+		INSERT INTO session_message VALUES ('m3', 's1', 'idle', 3, 1700000001000, 1700000001000, '{"outcome":"succeeded"}');
+	`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	vaultPath := filepath.Join(env.base, "opencode-import.db")
+	st := runStatusJSON(t, vaultPath)
+	item := harnessItem(t, st, "opencode")
+	if item["local_turns_count"] != float64(2) || item["unsynced_turns_count"] != float64(2) {
+		t.Fatalf("opencode status before reconcile = %+v", item)
+	}
+	res := run(t, "sync", "reconcile", "--db", vaultPath, "--harness", "opencode", "--layer", "episodic", "--json")
+	if res.code != 0 {
+		t.Fatalf("reconcile exit=%d stdout=%s stderr=%s", res.code, res.stdout, res.stderr)
+	}
+	rep := jsonObject(t, res.stdout)
+	if rep["episodic_imported_from_harness"] != float64(2) {
+		t.Fatalf("opencode reconcile = %+v", rep)
+	}
+	after := harnessItem(t, runStatusJSON(t, vaultPath), "opencode")
+	if after["synced_turns_count"] != float64(2) || after["unsynced_turns_count"] != float64(0) {
+		t.Fatalf("opencode status after reconcile = %+v", after)
+	}
+}
+
+// TestSyncStatusOpenCodeLegacyInventory keeps the older store readable as an
+// inventory: the session count and last activity still come from `session`, and
+// the panel must not claim turn coverage for a schema without `session_message`.
+func TestSyncStatusOpenCodeLegacyInventory(t *testing.T) {
 	env := newEnv(t)
 	configDir := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "opencode")
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
@@ -406,17 +524,17 @@ func TestSyncStatusOpenCodeInventoryHasNoTurnClaims(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	payload := runStatusJSON(t, filepath.Join(env.base, "opencode.db"))
+	payload := runStatusJSON(t, filepath.Join(env.base, "opencode-legacy.db"))
 	item := harnessItem(t, payload, "opencode")
-	if item["sessions_scan_supported"] != true || item["turns_scan_supported"] != false || item["sessions_count"] != float64(1) {
-		t.Fatalf("opencode item = %+v", item)
+	if item["sessions_scan_supported"] != true || item["turns_scan_supported"] != true || item["sessions_count"] != float64(1) {
+		t.Fatalf("opencode legacy item = %+v", item)
 	}
 	if item["local_turns_count"] != float64(0) || item["unsynced_turns_count"] != float64(0) {
-		t.Fatalf("opencode fabricated turn counts: %+v", item)
+		t.Fatalf("opencode legacy fabricated turn counts: %+v", item)
 	}
 	layer := payload["layers"].(map[string]any)["episodic"].(map[string]any)
 	if layer["alignment_known"] != true || layer["aligned"] != true {
-		t.Fatalf("opencode inventory poisoned alignment: %+v", layer)
+		t.Fatalf("opencode legacy inventory poisoned alignment: %+v", layer)
 	}
 }
 

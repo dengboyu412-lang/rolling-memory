@@ -777,6 +777,27 @@ func rotateAdminLedgerEpoch(ledgerPath string) error {
 // record themselves with timing and outcome, so no host-private store is
 // required. It is strictly no-op whenever ROLLING_MEMORY_DB is set or when
 // memoryPath is a test database.
+// rebindAdminLedgerFingerprint keeps a ledger written by an older build when its
+// stored identity is the legacy fingerprint of the same vault. Only a genuinely
+// different vault rotates the ledger aside; an anchor drift must not hide the
+// direct recall and hook events already recorded in the live ledger.
+func rebindAdminLedgerFingerprint(ledgerPath, fp, legacyFP string) error {
+	stored := readAdminLedgerFingerprint(ledgerPath)
+	if stored == "" || stored == fp {
+		return nil
+	}
+	if legacyFP != "" && stored == legacyFP {
+		ldb, err := openPlainSQLite(ledgerPath)
+		if err != nil {
+			return err
+		}
+		defer ldb.Close()
+		_, err = ldb.Exec(`UPDATE efficacy_meta SET value = ? WHERE key = 'db_fingerprint'`, fp)
+		return err
+	}
+	return rotateAdminLedgerEpoch(ledgerPath)
+}
+
 func syncProductionRecallLedger(home, memoryPath string) {
 	if strings.TrimSpace(home) == "" || strings.TrimSpace(os.Getenv("ROLLING_MEMORY_DB")) != "" {
 		return
@@ -790,14 +811,10 @@ func syncProductionRecallLedger(home, memoryPath string) {
 		return
 	}
 	ledgerPath := memoryPath + ".efficacy.sqlite"
-	// 账本与金库身份绑定：已绑定指纹与当前金库不符时，这本账属于另一个金库
-	// （或变更前的旧世代），绝不改写指纹、把两边事件混在同一身份下——按既有轮转
-	// 约定（.epoch-*）把旧账归档到旁边，从空账重新开世代；归档件在下一步按自身
-	// 指纹核验，异库侧册不会被拉回。
-	if storedFP := readAdminLedgerFingerprint(ledgerPath); storedFP != "" && storedFP != fp {
-		if err := rotateAdminLedgerEpoch(ledgerPath); err != nil {
-			return
-		}
+	// 账本与金库身份绑定：旧版指纹仍指向同一金库时原地改写为新指纹，保留既有事件；
+	// 只有确属另一个金库的账本才按 .epoch-* 轮转归档。
+	if err := rebindAdminLedgerFingerprint(ledgerPath, fp, computeAdminLegacyDBFingerprint(memoryPath, UserScope)); err != nil {
+		return
 	}
 	ldb, err := openPlainSQLite(ledgerPath)
 	if err != nil {
@@ -978,7 +995,45 @@ func borrowVaultReadOnly(memoryPath string) (*sql.DB, func()) {
 
 // computeAdminDBFingerprint mirrors the ledger writer's identity formula: one
 // database, one fingerprint, independent of which scope the console is viewing.
+// computeAdminDBFingerprint mirrors the ledger writer's stable identity formula:
+// one vault, one fingerprint, derived only from immutable creation metadata.
+// Corpus rows are deliberately excluded because background ingestion can change
+// the oldest row and must never rebind (or rotate) the ledger.
 func computeAdminDBFingerprint(memoryPath, scope string) string {
+	db, release := borrowVaultReadOnly(memoryPath)
+	if db == nil {
+		return ""
+	}
+	defer release()
+	var createdAt, engine string
+	_ = db.QueryRow(`SELECT coalesce(value, '') FROM db_meta WHERE key = 'created_at'`).Scan(&createdAt)
+	_ = db.QueryRow(`SELECT coalesce(value, '') FROM db_meta WHERE key = 'engine'`).Scan(&engine)
+	if strings.TrimSpace(createdAt) == "" {
+		return ""
+	}
+	// Readiness gate only: the oldest unit must exist, but its identity never
+	// enters the hash, so background churn cannot rebind the vault.
+	var firstDocID string
+	_ = db.QueryRow(`SELECT coalesce(unit_id, '') FROM rm_docs ORDER BY occurred_at ASC, rowid ASC LIMIT 1`).Scan(&firstDocID)
+	if strings.TrimSpace(firstDocID) == "" {
+		_ = db.QueryRow(`SELECT coalesce(doc_id, '') FROM rm_units ORDER BY occurred_at ASC, doc_id ASC LIMIT 1`).Scan(&firstDocID)
+	}
+	if strings.TrimSpace(firstDocID) == "" {
+		_ = db.QueryRow(`SELECT coalesce(noetic_id, '') FROM rm_noetic ORDER BY occurred_at ASC, rowid ASC LIMIT 1`).Scan(&firstDocID)
+	}
+	if strings.TrimSpace(firstDocID) == "" {
+		return ""
+	}
+	raw := strings.TrimSpace(createdAt) + "|" + strings.TrimSpace(engine)
+	sum := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(sum[:])[:24]
+}
+
+// computeAdminLegacyDBFingerprint reproduces the previous identity formula
+// (creation metadata plus the oldest canonical unit). It is used only to
+// recognise a ledger written by an older build so the ledger can be rebound in
+// place instead of rotated aside.
+func computeAdminLegacyDBFingerprint(memoryPath, scope string) string {
 	db, release := borrowVaultReadOnly(memoryPath)
 	if db == nil {
 		return ""
@@ -987,9 +1042,6 @@ func computeAdminDBFingerprint(memoryPath, scope string) string {
 	var createdAt, engine, firstDocID string
 	_ = db.QueryRow(`SELECT coalesce(value, '') FROM db_meta WHERE key = 'created_at'`).Scan(&createdAt)
 	_ = db.QueryRow(`SELECT coalesce(value, '') FROM db_meta WHERE key = 'engine'`).Scan(&engine)
-	// rm_units 是视图（无 rowid）；与疗效账本 ComputeDBFingerprint 同源，按规范表
-	// rm_docs 的最早写入行取锚，保证两侧指纹逐位一致。旧夹具只有 rm_units 表时
-	// 退化为按 doc_id 定序，仍保持确定性（不把空锚误报成身份失效）。
 	_ = db.QueryRow(`SELECT coalesce(unit_id, '') FROM rm_docs ORDER BY occurred_at ASC, rowid ASC LIMIT 1`).Scan(&firstDocID)
 	if strings.TrimSpace(firstDocID) == "" {
 		_ = db.QueryRow(`SELECT coalesce(doc_id, '') FROM rm_units ORDER BY occurred_at ASC, doc_id ASC LIMIT 1`).Scan(&firstDocID)
@@ -2495,7 +2547,12 @@ func queryROIFacts(ctx context.Context, memoryPath string, req roiFactsRequest) 
 	identityStatus := "unknown"
 	var storedFP string
 	if err := tx.QueryRowContext(ctx, `SELECT value FROM efficacy_meta WHERE key = 'db_fingerprint'`).Scan(&storedFP); err == nil && storedFP != "" {
-		if expectedFP := computeAdminDBFingerprint(memoryPath, scope); expectedFP != "" && storedFP == expectedFP {
+		expectedFP := computeAdminDBFingerprint(memoryPath, scope)
+		legacyFP := computeAdminLegacyDBFingerprint(memoryPath, scope)
+		if expectedFP != "" && storedFP == expectedFP {
+			identityStatus = "verified"
+		} else if legacyFP != "" && storedFP == legacyFP {
+			// Older build: same vault, legacy anchor. The next sync rebinds it in place.
 			identityStatus = "verified"
 		}
 	}

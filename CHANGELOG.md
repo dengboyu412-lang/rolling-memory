@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.14] - 2026-11-22
+
+### Added
+
+- OpenCode conversations are now imported into episodic memory: the background sync reads OpenCode's local SQLite session store (`session_v2` / `session_message`) and turns completed user/assistant exchanges into memory units through zero-copy `@ref:opencode:` pointers. The live resolver, prune/heal tools, backup preflight and console attribution recognize the new pointer family; older OpenCode stores without `session_message` keep inventory-only behavior, and turns without a completed final answer are reported as incomplete instead of imported.
+
+### Fixed
+
+- The MCP server no longer drops a live agent connection: input silence now releases the vault handle and keeps serving, and the default local-daemon sidecar survives both silence and a replaced build, so hosts that hold a quiet connection open no longer report `Connection closed: MCP server process exited with code 0`. `ROLLING_MEMORY_MCP_IDLE_EXIT` is replaced by `ROLLING_MEMORY_MCP_IDLE_RELEASE`.
+- The evidence-adoption audit ledger no longer resets when background ingestion changes which stored row sorts first. The ledger is now bound to the vault's immutable creation identity instead of the oldest stored row; a ledger written by an older build is rebound in place on upgrade so its settled history survives, and only a genuinely different vault rotates the ledger aside.
+- The console login page shows the current release version instead of a stale string.
+
 ## [0.0.13] - 2026-11-22
 
 ### Fixed
@@ -256,6 +268,7 @@ Initial public release.
 - **Licensing**: source-available under **PolyForm Noncommercial 1.0.0** — free to use, modify, and share for noncommercial purposes; commercial use or distribution requires a separate license.
 
 [Unreleased]: https://github.com/rocareer/rolling-memory/compare/v0.0.13...HEAD
+[0.0.14]: https://github.com/rocareer/rolling-memory/compare/v0.0.13...v0.0.14
 [0.0.13]: https://github.com/rocareer/rolling-memory/compare/v0.0.12...v0.0.13
 [0.0.12]: https://github.com/rocareer/rolling-memory/compare/v0.0.11...v0.0.12
 [0.0.11]: https://github.com/rocareer/rolling-memory/compare/v0.0.10...v0.0.11

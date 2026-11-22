@@ -1272,3 +1272,104 @@ func TestResolveJSONLTranscriptLocusCanonicalIdentity(t *testing.T) {
 		}
 	}
 }
+
+// writeOpenCodeScanFixture creates a session_message store with `turns` complete
+// user/assistant pairs. It returns the writer handle so a test can append to the
+// same store while a page is running.
+func writeOpenCodeScanFixture(t *testing.T, path string, turns int) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(`CREATE TABLE session_message (
+		id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER,
+		time_created INTEGER, time_updated INTEGER, data TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < turns; i++ {
+		userID, assistantID := fmt.Sprintf("u%d", i), fmt.Sprintf("a%d", i)
+		if _, err := db.Exec(`INSERT INTO session_message VALUES
+			(?, 's1', 'user', ?, ?, ?, ?),
+			(?, 's1', 'assistant', ?, ?, ?, ?),
+			(?, 's1', 'idle', ?, ?, ?, '{"outcome":"succeeded"}')`,
+			userID, i*3+1, int64(1793102400000+i*1000), int64(1793102400000+i*1000),
+			fmt.Sprintf(`{"text":"question %d"}`, i),
+			assistantID, i*3+2, int64(1793102400100+i*1000), int64(1793102400100+i*1000),
+			fmt.Sprintf(`{"content":[{"type":"text","text":"answer %d"}],"time":{"created":%d,"completed":%d}}`, i, 1793102400100+i*1000, 1793102400200+i*1000),
+			fmt.Sprintf("i%d", i), i*3+3, int64(1793102400200+i*1000), int64(1793102400200+i*1000),
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return db
+}
+
+// TestEpisodicOpenCodePageToleratesLiveWrites pins the SQLite source contract:
+// a host write during the page does not invalidate the rows already read, so the
+// page completes instead of retrying as a changed transcript.
+func TestEpisodicOpenCodePageToleratesLiveWrites(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "opencode.db")
+	writer := writeOpenCodeScanFixture(t, path, 2)
+	sources := []episodicScanSource{{HarnessID: "opencode", Kind: "opencode", Path: path, SessionID: "s1"}}
+	seen := 0
+	cursor, more, err := visitEpisodicSourcesVerified(context.Background(), sources, "mem:oc-live", episodicSourceCursor{}, 10, 0, func(_ *episodic.SourceSnapshot, turn candidateEpisodicTurn) error {
+		seen++
+		if seen == 1 {
+			if _, werr := writer.Exec(`INSERT INTO session_message VALUES
+				('u9', 's1', 'user', 99, 1793102500000, 1793102500000, '{"text":"live question"}'),
+				('a9', 's1', 'assistant', 100, 1793102500100, 1793102500100, '{"content":[{"type":"text","text":"live answer"}],"time":{"created":1793102500100,"completed":1793102500200}}')`); werr != nil {
+				t.Fatalf("append during page: %v", werr)
+			}
+		}
+		return nil
+	})
+	if err != nil || more {
+		t.Fatalf("live write failed the page: more=%v err=%v", more, err)
+	}
+	if seen != 4 {
+		t.Fatalf("page visited %d units, want 4", seen)
+	}
+	if cursor.RetrySources {
+		t.Fatalf("live write requested a retry: %+v", cursor)
+	}
+}
+
+// TestEpisodicOpenCodeCursorResume pins the page cursor for the SQLite source
+// kind: the second page restarts at the saved turn without repeating units.
+func TestEpisodicOpenCodeCursorResume(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "opencode.db")
+	writeOpenCodeScanFixture(t, path, 3)
+	sources := []episodicScanSource{{HarnessID: "opencode", Kind: "opencode", Path: path, SessionID: "s1"}}
+	var first []string
+	cursor, more, err := visitEpisodicSourcesVerified(context.Background(), sources, "mem:oc-resume", episodicSourceCursor{}, 1, 0, func(_ *episodic.SourceSnapshot, turn candidateEpisodicTurn) error {
+		first = append(first, turn.Text)
+		return nil
+	})
+	if err != nil || !more || len(first) != 1 {
+		t.Fatalf("first page more=%v texts=%v err=%v", more, first, err)
+	}
+	var rest []string
+	_, more, err = visitEpisodicSourcesVerified(context.Background(), sources, "mem:oc-resume", cursor, 10, 0, func(_ *episodic.SourceSnapshot, turn candidateEpisodicTurn) error {
+		rest = append(rest, turn.Text)
+		return nil
+	})
+	if err != nil || more {
+		t.Fatalf("second page more=%v err=%v", more, err)
+	}
+	if len(rest) != 5 {
+		t.Fatalf("second page visited %d units, want 5: %v", len(rest), rest)
+	}
+	all := append(first, rest...)
+	seen := map[string]bool{}
+	for _, text := range all {
+		if seen[text] {
+			t.Fatalf("unit repeated across pages: %q", text)
+		}
+		seen[text] = true
+	}
+	if !seen["[user] question 0"] || !seen["[assistant] answer 2"] {
+		t.Fatalf("pages missed units: %v", all)
+	}
+}

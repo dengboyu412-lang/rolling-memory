@@ -25,7 +25,7 @@ rolling-memory mcp        # 构建产物 bin/rolling-memory，或 install 生成
 | `ROLLING_MEMORY_MODE` | `local` | 运行模式 —— `local` 为默认值，也是本发布版的唯一模式 |
 | `ROLLING_MEMORY_PORTABLE` | 未设 | U 盘便携载荷根目录（设 `1` 时自动解析） |
 | `ROLLING_MEMORY_MCP_DEBUG` | 未设 | `1` 时把错误栈写 stderr |
-| `ROLLING_MEMORY_MCP_IDLE_EXIT` | `30m` | 空闲自退预算（Go duration）；`0` 或负值关闭空闲自退 |
+| `ROLLING_MEMORY_MCP_IDLE_RELEASE` | `30m` | 空闲释放金库句柄的预算（Go duration）；`0` 或负值表示不释放、保持句柄打开 |
 
 协议：换行分隔 JSON-RPC 2.0；服务端独占 stdout。客户端只需实现 `initialize` / `tools/list` / `tools/call`。
 
@@ -42,7 +42,7 @@ rolling-memory mcp        # 构建产物 bin/rolling-memory，或 install 生成
 
 服务端惰性连库：`initialize` 与 `tools/list` 不打开数据库；首个 `tools/call` 才打开。
 
-**进程生命周期（自退看门狗）**：stdio 是「一个连接一个进程」，宿主重连会留下被弃的旧连接；服务端看门狗让进程在三种情况下自行退出——①父进程消失（孤儿）；②磁盘上的可执行文件已不是本进程的构建（代际自退：换版后旧进程自动退场）；③输入静默超过 `ROLLING_MEMORY_MCP_IDLE_EXIT`（默认 `30m`，每次收到输入即重置）。stdio 宿主在下次调用时会重新拉起全新进程，因此自退是清理而不是故障；退出原因仅在 `ROLLING_MEMORY_MCP_DEBUG=1` 时写 stderr。
+**进程生命周期**：stdio 会话在整个宿主会话期内保持连接。仅两种情况下会话会主动结束：①父进程消失（孤儿）；②进程内服务发现磁盘上的可执行文件已不是本进程的构建，于是退出，让旧语义停止写入金库。输入静默超过 `ROLLING_MEMORY_MCP_IDLE_RELEASE`（默认 `30m`，每次收到输入即重置）时，进程内会话只关闭自己打开的金库句柄，下次调用时惰性重开；进程与宿主连接始终存活。默认的守护进程转发侧车本身不持有金库，因此输入静默与换版都不会中断它；共享守护进程在换版后自行退出，并在下次调用时重启。退出原因仅在 `ROLLING_MEMORY_MCP_DEBUG=1` 时写 stderr。
 
 ---
 

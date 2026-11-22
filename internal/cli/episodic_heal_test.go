@@ -400,7 +400,10 @@ func TestSameEpisodicSourceSessionPredicate(t *testing.T) {
 		{"jsonl different file", "@ref:jsonl:/tmp/a.jsonl:3#0", "@ref:jsonl:/tmp/b.jsonl:3#0", false},
 		{"zcode same session", "@ref:zcode:sess_x:msg_a#1", "@ref:zcode:sess_x:msg_b#0", true},
 		{"zcode different session", "@ref:zcode:sess_x:msg_a#1", "@ref:zcode:sess_y:msg_b#0", false},
+		{"opencode same session", "@ref:opencode:sess_x:msg_a#1", "@ref:opencode:sess_x:msg_b#0", true},
+		{"opencode different session", "@ref:opencode:sess_x:msg_a#1", "@ref:opencode:sess_y:msg_b#0", false},
 		{"cross kind", "@ref:zcode:sess_x:msg_a#1", "@ref:jsonl:/tmp/a.jsonl:0#0", false},
+		{"cross kind sqlite", "@ref:opencode:sess_x:msg_a#1", "@ref:zcode:sess_x:msg_b#0", false},
 		{"malformed second", "@ref:jsonl:/tmp/a.jsonl:3#0", "junk", false},
 	}
 	for _, tc := range cases {

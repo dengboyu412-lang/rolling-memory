@@ -180,9 +180,9 @@ type candidateEpisodicTurn struct {
 	LocusKnown bool
 	DocID      string
 	RefPointer string
-	// TurnRef is the provenance of the unit (`@ref:zcode:...` / `@ref:jsonl:...`,
-	// without the `#<k>` segment suffix). Content-addressed units can be said in
-	// several turns; the lineage table keeps every occurrence.
+	// TurnRef is the provenance of the unit (`@ref:zcode:...` / `@ref:opencode:...` /
+	// `@ref:jsonl:...`, without the `#<k>` segment suffix). Content-addressed units
+	// can be said in several turns; the lineage table keeps every occurrence.
 	TurnRef    string
 	Text       string
 	OccurredAt int64
@@ -1493,13 +1493,35 @@ func countExcludedSubagentSources(ctx context.Context, home, harnessID string) (
 			return 0, false
 		}
 		return count, true
+	case "opencode":
+		path := harness.SessionStorePath(home, "opencode")
+		if _, err := os.Stat(path); err != nil {
+			return 0, os.IsNotExist(err)
+		}
+		db, err := sql.Open("sqlite", ids.SQLiteFileURI(path)+"?mode=ro&_pragma=busy_timeout(1500)")
+		if err != nil {
+			return 0, false
+		}
+		defer db.Close()
+		var count int
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM session_v2 WHERE COALESCE(parent_id, '') <> ''`).Scan(&count); err != nil {
+			// Older stores have no parent column: no subagent inventory to
+			// exclude, which is a known empty scope rather than an unreadable
+			// one.
+			if strings.Contains(strings.ToLower(err.Error()), "no such") {
+				return 0, true
+			}
+			return 0, false
+		}
+		return count, true
 	default:
 		return 0, true
 	}
 }
 
 // scanHarnessTurns discovers local conversation sessions and extracts User+Assistant
-// turn pairs for a given harness (`zcode`, `claude-code`, `codex`, `dsh`, `codebuddy`, `workbuddy`).
+// turn pairs for a given harness (`zcode`, `claude-code`, `codex`, `dsh`,
+// `codebuddy`, `workbuddy`, `opencode`, `doubao`).
 func scanHarnessTurns(home, harnessID, scope string, maxTurns int) (int, []candidateEpisodicTurn, int64) {
 	sessions, turns, lastActiveAt, _ := scanHarnessTurnsWithCoverage(home, harnessID, scope, maxTurns)
 	return sessions, turns, lastActiveAt
@@ -1510,13 +1532,20 @@ func scanHarnessTurnsWithCoverage(home, harnessID, scope string, maxTurns int) (
 	return sessions, turns, lastActiveAt, complete
 }
 
+// episodicSQLiteSource reports whether a source is read through a SQLite
+// database whose WAL can change during the page while rows already read stay
+// stable. Their stamp changes never invalidate a completed read.
+func episodicSQLiteSource(kind string) bool {
+	return kind == "zcode" || kind == "opencode"
+}
+
 // episodicStampMatters reports whether a source stamp change invalidates the
-// completeness verdict. SQLite-backed zcode sources are read through one
-// read-only transaction per session: concurrent appends land after the snapshot
-// and cannot corrupt the turns already read, so a live database/WAL write is not
-// an incomplete scan. Transcript files keep the strict stamp check.
+// completeness verdict. SQLite-backed sources are read through one read-only
+// transaction per session: concurrent appends land after the snapshot and cannot
+// corrupt the turns already read, so a live database/WAL write is not an
+// incomplete scan. Transcript files keep the strict stamp check.
 func episodicStampMatters(source episodicScanSource, before, after string) bool {
-	return before != after && source.Kind != "zcode"
+	return before != after && !episodicSQLiteSource(source.Kind)
 }
 
 // episodicSourceActivity returns the source's last-write time in unix seconds.
@@ -1549,10 +1578,6 @@ func scanHarnessTurnsWithCoverageBoundContext(ctx context.Context, home, harness
 	if maxTurns <= 0 {
 		maxTurns = 100
 	}
-	if harnessID == "opencode" {
-		s, t, l, c := scanOpenCodeSessions(ctx, home)
-		return s, t, l, c, 0
-	}
 	if !harness.TurnsScannable(harnessID) {
 		seen := map[string]bool{}
 		for _, pattern := range harness.TranscriptGlobs(home, harnessID) {
@@ -1578,10 +1603,12 @@ func scanHarnessTurnsWithCoverageBoundContext(ctx context.Context, home, harness
 	sessionsCount = len(sources)
 	// Last activity is host telemetry, not collection scope: compute it before
 	// the ingest bound filters the read set, so an old host still shows when it
-	// last wrote instead of collapsing to "-".
+	// last wrote instead of collapsing to "-". A SQLite source carries its
+	// session's last write, which is more precise than the shared database file
+	// mtime; transcript sources fall back to the file mtime.
 	for _, source := range sources {
-		if info, err := os.Stat(source.Path); err == nil && info.ModTime().Unix() > lastActiveAt {
-			lastActiveAt = info.ModTime().Unix()
+		if activity := episodicSourceActivity(source); activity > lastActiveAt {
+			lastActiveAt = activity
 		}
 	}
 	if since > 0 {
@@ -1642,33 +1669,6 @@ func scanHarnessTurnsWithCoverageBoundContext(ctx context.Context, home, harness
 		turns = append(turns, sourceTurns...)
 	}
 	return sessionsCount, turns, lastActiveAt, complete, outOfScope
-}
-
-// scanOpenCodeSessions reads OpenCode's SQLite session store for inventory and
-// last-activity. OpenCode keeps turns in message/part rows with a host-specific
-// JSON schema, so turn extraction stays unsupported; the panel reports
-// sessions_scan_supported=true and turns_scan_supported=false.
-func scanOpenCodeSessions(ctx context.Context, home string) (int, []candidateEpisodicTurn, int64, bool) {
-	path := harness.SessionStorePath(home, "opencode")
-	if _, err := os.Stat(path); err != nil {
-		return 0, nil, 0, os.IsNotExist(err)
-	}
-	db, err := sql.Open("sqlite", ids.SQLiteFileURI(path)+"?mode=ro&_pragma=busy_timeout(1500)")
-	if err != nil {
-		return 0, nil, 0, false
-	}
-	defer db.Close()
-	var count int
-	var lastMS int64
-	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(*), COALESCE(MAX(time_updated), 0) FROM session WHERE COALESCE(time_archived, 0) = 0`,
-	).Scan(&count, &lastMS); err != nil {
-		return 0, nil, 0, false
-	}
-	if lastMS < 0 {
-		lastMS = 0
-	}
-	return count, nil, lastMS / 1000, true
 }
 
 // countDirtyBackgroundFiles checks whether any mounted background file on disk has changed mtime/size

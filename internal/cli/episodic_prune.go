@@ -421,6 +421,26 @@ func pruneOrphanNoeticAndHealLoci(ctx context.Context, db *sql.DB, beforeDelete 
 				_ = zdb.Close()
 			}
 		}
+		odbPath := harness.SessionStorePath(home, "opencode")
+		if _, statErr := os.Stat(odbPath); statErr == nil {
+			if odb, oErr := sql.Open("sqlite", ids.SQLiteFileURI(odbPath)+"?mode=ro&_pragma=busy_timeout(1500)"); oErr == nil {
+				if sRows, qErr := odb.QueryContext(ctx, `SELECT id, COALESCE(directory, '') FROM session_v2 WHERE COALESCE(directory, '') <> ''`); qErr == nil {
+					for sRows.Next() {
+						var sid, dir string
+						if sRows.Scan(&sid, &dir) == nil && sid != "" && dir != "" {
+							loc, cached := dirLocusCache[dir]
+							if !cached {
+								loc = facade.ResolveWorkspaceLocus(dir)
+								dirLocusCache[dir] = loc
+							}
+							sessionLocus[sid] = loc
+						}
+					}
+					sRows.Close()
+				}
+				_ = odb.Close()
+			}
+		}
 	}
 	type docLocusUpdate struct {
 		docID string
@@ -448,6 +468,14 @@ func pruneOrphanNoeticAndHealLoci(ctx context.Context, db *sql.DB, beforeDelete 
 			resolved := false
 			if strings.HasPrefix(trimmed, "@ref:zcode:") {
 				rest := strings.TrimPrefix(trimmed, "@ref:zcode:")
+				if colon := strings.IndexByte(rest, ':'); colon > 0 {
+					if loc, found := sessionLocus[rest[:colon]]; found {
+						trueLocus = loc
+						resolved = true
+					}
+				}
+			} else if strings.HasPrefix(trimmed, "@ref:opencode:") {
+				rest := strings.TrimPrefix(trimmed, "@ref:opencode:")
 				if colon := strings.IndexByte(rest, ':'); colon > 0 {
 					if loc, found := sessionLocus[rest[:colon]]; found {
 						trueLocus = loc

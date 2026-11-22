@@ -168,9 +168,34 @@ func ComputeDBFingerprintFromPath(memoryDBPath, scope string) string {
 	return ComputeDBFingerprint(conn, scope)
 }
 
+// ComputeLegacyDBFingerprintFromPath computes the previous fingerprint formula
+// for a memory DB file. It is used only to recognise a ledger written by an
+// older build so the ledger can be rebound in place instead of rotated.
+func ComputeLegacyDBFingerprintFromPath(memoryDBPath string) string {
+	if strings.TrimSpace(memoryDBPath) == "" || memoryDBPath == ":memory:" || strings.HasPrefix(memoryDBPath, "file:") || strings.ContainsAny(memoryDBPath, "?#") {
+		return ""
+	}
+	absPath, err := filepath.Abs(memoryDBPath)
+	if err != nil {
+		return ""
+	}
+	info, err := os.Stat(absPath)
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	conn, err := sql.Open("sqlite", absPath+"?mode=ro&_pragma=busy_timeout(100)")
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+	return LegacyDBFingerprint(conn)
+}
+
 // BindDatabaseFingerprint binds the ledger to a specific memory database fingerprint,
 // or verifies that an already-bound ledger matches the expected fingerprint.
-func (l *Ledger) BindDatabaseFingerprint(fp string) error {
+// A stored legacy fingerprint that still names the same vault is rewritten to the
+// stable fingerprint in place, preserving every event already in the ledger.
+func (l *Ledger) BindDatabaseFingerprint(fp, legacyFP string) error {
 	fp = strings.TrimSpace(fp)
 	if fp == "" {
 		return errors.New("empty database fingerprint")
@@ -192,6 +217,12 @@ func (l *Ledger) BindDatabaseFingerprint(fp string) error {
 		return err
 	}
 	if existing != fp {
+		if legacyFP = strings.TrimSpace(legacyFP); legacyFP != "" && existing == legacyFP {
+			if _, err := tx.Exec(`UPDATE efficacy_meta SET value = ? WHERE key = 'db_fingerprint'`, fp); err != nil {
+				return err
+			}
+			return tx.Commit()
+		}
 		return errors.New("ledger database fingerprint mismatch")
 	}
 	return nil
@@ -200,11 +231,10 @@ func (l *Ledger) BindDatabaseFingerprint(fp string) error {
 // Close closes the ledger connection.
 func (l *Ledger) Close() error { return l.db.Close() }
 
-// OpenBoundLedger opens the ledger bound to fp. The ledger is a derived artifact:
-// when the stored fingerprint belongs to another database (or to the same database
-// before a schema-era change), the stale ledger is rotated aside and a fresh epoch
-// starts instead of mixing unrelated facts under one identity.
-func OpenBoundLedger(path, fp string) (*Ledger, error) {
+// OpenBoundLedger opens the ledger bound to fp. A stored legacy fingerprint that
+// still names the same vault is rebound in place; a ledger that belongs to a
+// different database is rotated aside so unrelated facts never share an identity.
+func OpenBoundLedger(path, fp, legacyFP string) (*Ledger, error) {
 	if strings.TrimSpace(fp) == "" {
 		return nil, errors.New("empty database fingerprint")
 	}
@@ -212,7 +242,7 @@ func OpenBoundLedger(path, fp string) (*Ledger, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := ledger.BindDatabaseFingerprint(fp); err == nil {
+	if err := ledger.BindDatabaseFingerprint(fp, legacyFP); err == nil {
 		return ledger, nil
 	}
 	if err := ledger.Close(); err != nil {
@@ -225,7 +255,7 @@ func OpenBoundLedger(path, fp string) (*Ledger, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := ledger.BindDatabaseFingerprint(fp); err != nil {
+	if err := ledger.BindDatabaseFingerprint(fp, ""); err != nil {
 		ledger.Close()
 		return nil, err
 	}

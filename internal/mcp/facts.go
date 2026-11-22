@@ -91,7 +91,7 @@ func recordRecallFact(memory *facade.Memory, presence *text.PresenceCoordinates,
 				entry.ElapsedMS = &elapsed
 			}
 		}
-		ledger, err := efficacy.OpenBoundLedger(path, fp)
+		ledger, err := efficacy.OpenBoundLedger(path, fp, efficacy.ComputeLegacyDBFingerprintFromPath(cfg.DB))
 		if err != nil {
 			return
 		}
