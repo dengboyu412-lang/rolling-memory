@@ -80,8 +80,9 @@ func scheduleLogPath() string {
 	return filepath.Join(filepath.Dir(StatePath()), "update-schedule.log")
 }
 
-// InstallSchedule creates a user-level periodic check. It only refreshes the
-// shared cache and sends a desktop notification; it never installs an update.
+// InstallSchedule creates a user-level periodic run of the saved update.auto
+// policy. The command decides whether to only refresh the shared cache, notify,
+// or install a verified update; "off" is a no-op.
 func InstallSchedule(binary, releaseBase string) (ScheduleStatus, error) {
 	binary, err := scheduleBinary(binary)
 	if err != nil {
@@ -147,7 +148,7 @@ func InstallSchedule(binary, releaseBase string) (ScheduleStatus, error) {
 			status.Detail = "dry run: scheduled task planned"
 			return status, nil
 		}
-		taskCommand := fmt.Sprintf("\"%s\" update --check --quiet --notify%s", binary, windowsReleaseArg(releaseBase))
+		taskCommand := fmt.Sprintf("\"%s\" update --auto --quiet%s", binary, windowsReleaseArg(releaseBase))
 		if output, err := exec.Command("schtasks", "/Create", "/F", "/SC", "HOURLY", "/MO", "6",
 			"/TN", scheduleTaskName, "/TR", taskCommand).CombinedOutput(); err != nil {
 			return status, fmt.Errorf("schtasks /Create: %w (%s)", err, strings.TrimSpace(string(output)))
@@ -307,9 +308,8 @@ func launchdPlist(binary, releaseBase string) []byte {
   <array>
     <string>%s</string>
     <string>update</string>
-    <string>--check</string>
+    <string>--auto</string>
     <string>--quiet</string>
-    <string>--notify</string>
 %s  </array>
   <key>StartInterval</key><integer>%d</integer>
   <key>RunAtLoad</key><true/>
@@ -326,7 +326,7 @@ Description=Rolling Memory update check
 
 [Service]
 Type=oneshot
-ExecStart=%s update --check --quiet --notify%s
+ExecStart=%s update --auto --quiet%s
 `, systemdQuote(binary), systemdArg(releaseBase)))
 }
 

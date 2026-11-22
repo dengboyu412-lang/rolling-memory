@@ -22,7 +22,7 @@
                             <span class="live-dot"></span>
                             <span>
                                 {{ rmData.engine_online ? $t('dashboard.engineOnline') : $t('dashboard.engineOffline') }}
-                                · v{{ rmData.version || '0.0.11' }} · Core v1.0.1
+                                · v{{ rmData.version || '0.0.12' }} · Core v1.0.1
                             </span>
                         </div>
                         <div class="meta-item meta-mode-switch" data-testid="dashboard-mode-switch">
@@ -1782,16 +1782,24 @@ const kpiList = computed<KpiItem[]>(() => {
             key: 'sales',
             title: t('dashboard.salesAmount'),
             tooltip: isEn
-                ? '0-LLM Local Recall Latency (ms): the median end-to-end wall time of the latest successful MCP recall calls (local vault path incl. process/transport overhead). A single spike no longer sets the headline; latest and peak are in the hover detail.'
-                : '0-LLM 本地检索耗时（毫秒）：最近若干次成功 MCP 召回端到端墙钟耗时（本地金库路径，含进程/传输开销）的中位数。单次尖峰不再决定主读数；最近一次与峰值见悬停说明。',
-            value: `${rmData.latency_p50_ms || rmData.last_recall_ms} ms`,
-            valueTip: isEn
-                ? `Median (latest ${rmData.latency_samples || 0} successful MCP recalls): ${rmData.latency_p50_ms} ms · Latest: ${rmData.last_recall_ms} ms · Peak: ${rmData.latency_max_ms} ms`
-                : `近 ${rmData.latency_samples || 0} 次成功 MCP 召回的墙钟中位数：${rmData.latency_p50_ms} ms · 最近一次：${rmData.last_recall_ms} ms · 峰值：${rmData.latency_max_ms} ms`,
-            trend: rmData.latency_trend,
+                ? '0-LLM Local Recall Latency (ms): the median server-side handling time of the latest successful MCP recalls (retrieval + delivery, including the server queue; host IPC is excluded). Every harness is measured the same way. A single spike no longer sets the headline; latest and peak are in the hover detail.'
+                : '0-LLM 本地检索耗时（毫秒）：最近若干次成功 MCP 召回在记忆服务端的处理耗时（检索 + 交付，含服务端排队；不含宿主 IPC）的中位数。所有宿主同一口径。单次尖峰不再决定主读数；最近一次与峰值见悬停说明。',
+            value: rmData.latency_samples > 0 ? `${rmData.latency_p50_ms || rmData.last_recall_ms} ms` : '—',
+            valueTip: rmData.latency_samples > 0
+                ? isEn
+                    ? `Median (latest ${rmData.latency_samples} successful MCP recalls, all harnesses): ${rmData.latency_p50_ms} ms · Latest: ${rmData.last_recall_ms} ms · Peak: ${rmData.latency_max_ms} ms`
+                    : `近 ${rmData.latency_samples} 次成功 MCP 召回（全宿主）的服务端耗时中位数：${rmData.latency_p50_ms} ms · 最近一次：${rmData.last_recall_ms} ms · 峰值：${rmData.latency_max_ms} ms`
+                : isEn
+                  ? 'No successful MCP recall samples yet. The next recall populates the median across all harnesses.'
+                  : '暂无成功 MCP 召回样本；下一次 recall 后自动出现全宿主中位数。',
+            trend: rmData.latency_samples > 0 ? rmData.latency_trend : 0,
             trendUp: rmData.latency_trend <= 0,
             kind: 'delta',
-            sub: `${t('dashboard.kpiSubLatency')} (${rmData.avg_recall_ms}ms)`,
+            sub: rmData.latency_samples > 0
+                ? `${t('dashboard.kpiSubLatency')} (${rmData.avg_recall_ms}ms)`
+                : isEn
+                  ? 'Waiting for the next MCP recall'
+                  : '等待新的 MCP 召回',
             subTip: isEn
                 ? 'Relative delta between the median recall latency and the rolling average (green downward means faster)'
                 : '中位耗时相对近期均值的变化率（下降/绿色表示检索更快）',

@@ -59,6 +59,11 @@ const (
 // before asking it to step down.
 var errUnixDaemonExecutableMismatch = errors.New("daemon executable mismatch")
 
+// errUnixDaemonIdentityMismatch marks a same-owner daemon that is healthy but
+// was started under a different configuration identity, so a request can only
+// proceed after the daemon is retired and restarted under the current config.
+var errUnixDaemonIdentityMismatch = errors.New("daemon mode or configuration identity mismatch")
+
 // DefaultUnixSocketPath returns the canonical Unix domain socket path for the
 // shared local memory daemon (`~/.local/state/rolling-memory/engine.sock`).
 func DefaultUnixSocketPath() string {
@@ -186,6 +191,11 @@ func unixDaemonConfigID(cfg *config.Config) (string, error) {
 	// input: exclude it from the identity so that saving a new cap can still
 	// reach the running daemon and restart it instead of failing the handshake.
 	resolved.Daemon = config.DaemonConfig{}
+	// Release-channel/source preferences and evaluation answerer settings are
+	// console- and eval-only: the daemon neither fetches releases nor answers
+	// eval questions, so persisting them must not invalidate a live daemon.
+	resolved.Eval = config.EvalConfig{}
+	resolved.Update = config.UpdateConfig{}
 	var err error
 	if resolved.Path, err = filepath.Abs(resolved.Path); err != nil {
 		return "", err
@@ -473,7 +483,11 @@ func ShutdownUnixDaemon(sockPath string) error {
 		return err
 	}
 	if err := requestUnixDaemonControl(sockPath, "/v1/shutdown", cfg); err != nil {
-		if !errors.Is(err, errUnixDaemonExecutableMismatch) {
+		// A daemon can hold this vault and still fail the control handshake: it
+		// may be an older executable, or it may predate a configuration change.
+		// Both are retired through the ownership-and-vault verification path so
+		// the next request starts a daemon under the current configuration.
+		if !errors.Is(err, errUnixDaemonExecutableMismatch) && !errors.Is(err, errUnixDaemonIdentityMismatch) {
 			return err
 		}
 		if staleErr := shutdownStaleUnixDaemon(sockPath, info, cfg); staleErr != nil {
@@ -1091,7 +1105,7 @@ func verifiedUnixDaemonConnContext(ctx context.Context, sockPath string, cfg *co
 	if !health.OK || health.PID != pid || health.IdentityVersion != daemonIdentityVersion ||
 		health.Mode != "local" || health.PulseMode != "local_plain" || health.ConfigID != configID ||
 		!sameFileOrCleanPath(health.DB, cfg.DB) {
-		return fail(errors.New("daemon mode or configuration identity mismatch"))
+		return fail(fmt.Errorf("%w: run `rolling-memory daemon restart` to apply the current configuration", errUnixDaemonIdentityMismatch))
 	}
 	if err := ctx.Err(); err != nil {
 		return fail(err)

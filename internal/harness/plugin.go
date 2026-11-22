@@ -13,8 +13,8 @@ import (
 	"strings"
 )
 
-// zcodePluginInfo describes an enabled self-contained harness plugin for Rolling-Memory.
-type zcodePluginInfo struct {
+// nativePluginInfo describes an enabled self-contained harness plugin for Rolling-Memory.
+type nativePluginInfo struct {
 	ID        string
 	Dir       string
 	SkillMD   string
@@ -27,9 +27,9 @@ type zcodePluginInfo struct {
 
 // activeNativePlugin discovers enabled native plugin declarations. Has* fields
 // describe local files or registrations, not verified host runtime state.
-func activeNativePlugin(harness Harness, options InstallOptions) (zcodePluginInfo, bool) {
+func activeNativePlugin(harness Harness, options InstallOptions) (nativePluginInfo, bool) {
 	if options.Project {
-		return zcodePluginInfo{}, false
+		return nativePluginInfo{}, false
 	}
 	switch harness.ID {
 	case "zcode":
@@ -42,7 +42,7 @@ func activeNativePlugin(harness Harness, options InstallOptions) (zcodePluginInf
 		)
 	case "claude-code":
 		if harness.HooksPath == nil {
-			return zcodePluginInfo{}, false
+			return nativePluginInfo{}, false
 		}
 		return activePluginFromConfig(
 			*harness.HooksPath,
@@ -59,25 +59,25 @@ func activeNativePlugin(harness Harness, options InstallOptions) (zcodePluginInf
 		// load in place from plugins/marketplaces/<name>.
 		return activeWorkBuddyPlugin(harness, options)
 	default:
-		return zcodePluginInfo{}, false
+		return nativePluginInfo{}, false
 	}
 }
 
-func activePluginFromConfig(configPath string, enabledPath []string, cacheRoot, manifestDir string, options InstallOptions) (zcodePluginInfo, bool) {
+func activePluginFromConfig(configPath string, enabledPath []string, cacheRoot, manifestDir string, options InstallOptions) (nativePluginInfo, bool) {
 	if configPath == "" || !fileExists(configPath) {
-		return zcodePluginInfo{}, false
+		return nativePluginInfo{}, false
 	}
 	data, err := loadJSONFile(configPath)
 	if err != nil {
-		return zcodePluginInfo{}, false
+		return nativePluginInfo{}, false
 	}
 	enabledVal, found := jsonLookup(data, enabledPath)
 	if !found || enabledVal == nil {
-		return zcodePluginInfo{}, false
+		return nativePluginInfo{}, false
 	}
 	enabledMap, ok := asObject(enabledVal)
 	if !ok {
-		return zcodePluginInfo{}, false
+		return nativePluginInfo{}, false
 	}
 	prefix := options.Name + "@"
 	pluginID := ""
@@ -94,20 +94,20 @@ func activePluginFromConfig(configPath string, enabledPath []string, cacheRoot, 
 		}
 	}
 	if pluginID == "" {
-		return zcodePluginInfo{}, false
+		return nativePluginInfo{}, false
 	}
 	pluginDir := resolvePluginCacheDirFor(cacheRoot, market, options.Name, manifestDir)
 	if pluginDir == "" {
-		return zcodePluginInfo{}, false
+		return nativePluginInfo{}, false
 	}
 	return inspectPluginDir(pluginDir, manifestDir, pluginID, options)
 }
 
 // inspectPluginDir reports declarations separately from verified replacements.
-func inspectPluginDir(pluginDir, manifestDir, pluginID string, options InstallOptions) (zcodePluginInfo, bool) {
+func inspectPluginDir(pluginDir, manifestDir, pluginID string, options InstallOptions) (nativePluginInfo, bool) {
 	manifest, err := loadJSONFile(filepath.Join(pluginDir, manifestDir, "plugin.json"))
 	if err != nil {
-		return zcodePluginInfo{}, false
+		return nativePluginInfo{}, false
 	}
 	skillMD := filepath.Join(pluginDir, "skills", options.SkillName, "SKILL.md")
 	hasSkill := fileExists(skillMD)
@@ -131,11 +131,11 @@ func inspectPluginDir(pluginDir, manifestDir, pluginID string, options InstallOp
 	}
 	hasHooks := pluginHasHooks(filepath.Join(pluginDir, "hooks", "hooks.json"), pluginDir)
 	if !hasSkill && !hasMCP && !hasHooks {
-		return zcodePluginInfo{}, false
+		return nativePluginInfo{}, false
 	}
 	// Local files cannot establish that the host loaded the plugin. None of the
 	// declared surfaces is a verified replacement for an existing registration.
-	return zcodePluginInfo{
+	return nativePluginInfo{
 		ID:        pluginID,
 		Dir:       pluginDir,
 		SkillMD:   skillMD,
@@ -213,7 +213,7 @@ func expandPluginRoot(value, root string) string {
 // activeWorkBuddyPlugin resolves the enabled native plugin for WorkBuddy. The
 // host materialises plugins into plugins/cache/ on install, but directory
 // marketplaces also load in place, so the marketplace directory is a fallback.
-func activeWorkBuddyPlugin(harness Harness, options InstallOptions) (zcodePluginInfo, bool) {
+func activeWorkBuddyPlugin(harness Harness, options InstallOptions) (nativePluginInfo, bool) {
 	if info, ok := activePluginFromConfig(
 		filepath.Join(harness.Detect, "settings.json"),
 		[]string{"enabledPlugins"},
@@ -228,23 +228,23 @@ func activeWorkBuddyPlugin(harness Harness, options InstallOptions) (zcodePlugin
 
 // activePluginFromMarketplaceDir resolves an enabled plugin whose files live in
 // the marketplace directory itself (plugins/marketplaces/<name>/<source>).
-func activePluginFromMarketplaceDir(detect string, options InstallOptions) (zcodePluginInfo, bool) {
+func activePluginFromMarketplaceDir(detect string, options InstallOptions) (nativePluginInfo, bool) {
 	settings, err := loadJSONFile(filepath.Join(detect, "settings.json"))
 	if err != nil {
-		return zcodePluginInfo{}, false
+		return nativePluginInfo{}, false
 	}
 	enabledValue, found := jsonLookup(settings, []string{"enabledPlugins"})
 	if !found {
-		return zcodePluginInfo{}, false
+		return nativePluginInfo{}, false
 	}
 	enabledPlugins, ok := asObject(enabledValue)
 	if !ok {
-		return zcodePluginInfo{}, false
+		return nativePluginInfo{}, false
 	}
 	marketplacesRoot := filepath.Join(detect, "plugins", "marketplaces")
 	entries, err := os.ReadDir(marketplacesRoot)
 	if err != nil {
-		return zcodePluginInfo{}, false
+		return nativePluginInfo{}, false
 	}
 	for _, entry := range entries {
 		if !entry.IsDir() {
@@ -335,7 +335,7 @@ func activePluginFromMarketplaceDir(detect string, options InstallOptions) (zcod
 			return inspectPluginDir(absDir, ".codebuddy-plugin", pluginID, options)
 		}
 	}
-	return zcodePluginInfo{}, false
+	return nativePluginInfo{}, false
 }
 
 // pluginHasHooks identifies the expected hook declaration. File and command
@@ -399,10 +399,6 @@ func pluginHasHooks(path, pluginDir string) bool {
 	return len(HookEvents) > 0
 }
 
-func resolvePluginCacheDir(cacheRoot, market, pluginName string) string {
-	return resolvePluginCacheDirFor(cacheRoot, market, pluginName, ".zcode-plugin")
-}
-
 func resolvePluginCacheDirFor(cacheRoot, market, pluginName, manifestDir string) string {
 	var markets []string
 	if market != "" {
@@ -447,7 +443,7 @@ func resolvePluginCacheDirFor(cacheRoot, market, pluginName, manifestDir string)
 	return ""
 }
 
-func zcodeHasGlobalHooks(harness Harness, options InstallOptions) bool {
+func configHasGlobalHooks(harness Harness, options InstallOptions) bool {
 	if harness.HooksPath == nil || !fileExists(*harness.HooksPath) {
 		return false
 	}

@@ -10,6 +10,8 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +21,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/rocareer/rolling-memory/internal/clock"
 	"github.com/rocareer/rolling-memory/internal/config"
@@ -288,6 +291,36 @@ func (m *Memory) snapshotStatus() map[string]any {
 	return status
 }
 
+// snapshotBuilderRecent reports whether the background builder completed a run
+// without failures inside a window that covers a few publication cadences.
+func snapshotBuilderRecent(connection *sql.DB, cfg *config.Config) bool {
+	if connection == nil {
+		return false
+	}
+	var raw []byte
+	if err := connection.QueryRow(`SELECT v FROM rm_meta WHERE k = ?`, "snapshot_build_status").Scan(&raw); err != nil {
+		return false
+	}
+	var status struct {
+		At       int64 `json:"at"`
+		Failures int   `json:"failures"`
+		Blocked  bool  `json:"blocked"`
+	}
+	if json.Unmarshal(raw, &status) != nil || status.Blocked || status.Failures != 0 || status.At <= 0 {
+		return false
+	}
+	window := 3 * config.DefaultSnapshotInterval
+	if cfg != nil {
+		if interval := cfg.Daemon.EffectiveSnapshotInterval(); interval > 0 {
+			window = 3 * interval
+		}
+	}
+	if window < 2*time.Minute {
+		window = 2 * time.Minute
+	}
+	return time.Since(time.Unix(status.At, 0)) <= window
+}
+
 // Doctor runs the fixed environment and integrity report.
 func (m *Memory) Doctor() (map[string]any, error) {
 	checks := []any{}
@@ -310,6 +343,19 @@ func (m *Memory) Doctor() (map[string]any, error) {
 		return nil, err
 	}
 	check("corpus", true, fmt.Sprintf("%d memory units · %d term postings", corpus.MemoryUnits(), terms))
+	// The revision counters are the O(1) freshness identity behind the snapshot
+	// signature and the delta gate; drift means a writer bypassed the delete side
+	// (for example a REPLACE rewrite that no longer compensates the counter).
+	var counterDocs, counterTerms int64
+	if err := m.Store.DB().QueryRow(`SELECT docs_cnt, terms_cnt FROM rm_revision WHERE id = 1`).Scan(&counterDocs, &counterTerms); err == nil {
+		liveDocs := int64(corpus.Episodic + corpus.Background)
+		liveTerms := int64(terms)
+		check("corpus_counters", counterDocs == liveDocs && counterTerms == liveTerms,
+			fmt.Sprintf("docs %d/%d · terms %d/%d", counterDocs, liveDocs, counterTerms, liveTerms))
+		if counterDocs != liveDocs || counterTerms != liveTerms {
+			warnings = append(warnings, "corpus counters drifted from the live row counts; the snapshot signature and delta gate will keep missing")
+		}
+	}
 	// A collapsed event timeline is not a correctness problem, but it multiplies
 	// storage: the cluster pipeline pairs units that share a spacetime bucket.
 	if concentration, err := db.ReadTimeConcentration(m.Store.DB()); err == nil && concentration.Docs > 0 {
@@ -346,6 +392,12 @@ func (m *Memory) Doctor() (map[string]any, error) {
 		}
 	}
 	changeOK := docsCnt == 0 || (changeGapKnown && changeGap < 512)
+	if !changeOK && changeGapKnown && snapshotBuilderRecent(m.Store.DB(), m.Config) {
+		// A burst of writes (a background mount pass, a transcript backfill) can
+		// outrun the one-minute publication cadence without stalling the builder.
+		// A recent successful build means the gap is backlog, not a dead loop.
+		changeOK = true
+	}
 	check("snapshot_change_gap", changeOK, fmt.Sprintf("change_seq=%d gap=%d known=%v", changeSeq, changeGap, changeGapKnown))
 	// The deployment face only speaks when it has something to say: the fixed check
 	// list is a published contract, while an image/deployment mismatch is an alarm.

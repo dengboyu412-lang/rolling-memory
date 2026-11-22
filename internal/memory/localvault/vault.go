@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
@@ -25,6 +24,7 @@ import (
 	"github.com/rocareer/rolling-memory/internal/core"
 	"github.com/rocareer/rolling-memory/internal/episodic"
 	"github.com/rocareer/rolling-memory/internal/episodicunit"
+	"github.com/rocareer/rolling-memory/internal/harness"
 	"github.com/rocareer/rolling-memory/internal/ids"
 	plain "github.com/rocareer/rolling-memory/sdk/go/pulse/plain"
 )
@@ -1868,7 +1868,10 @@ func openZCodeReadOnly() (*sql.DB, error) {
 	if err != nil || home == "" {
 		return nil, errors.New("localvault: cannot resolve user home directory")
 	}
-	zdbPath := filepath.Join(home, ".zcode", "cli", "db", "db.sqlite")
+	zdbPath := harness.SessionStorePath(home, "zcode")
+	if zdbPath == "" {
+		return nil, errors.New("localvault: zcode session store not configured")
+	}
 	if _, err := os.Stat(zdbPath); err != nil {
 		return nil, err
 	}
@@ -2921,7 +2924,10 @@ func resolveZCodeTurnLive(sessionID, userMsgID string) (string, error) {
 	if err != nil || home == "" {
 		return "", errors.New("localvault: cannot resolve user home directory")
 	}
-	zdbPath := filepath.Join(home, ".zcode", "cli", "db", "db.sqlite")
+	zdbPath := harness.SessionStorePath(home, "zcode")
+	if zdbPath == "" {
+		return "", errors.New("localvault: zcode session store not configured")
+	}
 	if _, err := os.Stat(zdbPath); err != nil {
 		return "", err
 	}

@@ -35,6 +35,10 @@ type LedgerEvent struct {
 	Observation   string `json:"observation"` // observed or unknown
 	TextSHA256    string `json:"text_sha256,omitempty"`
 	TextBytes     *int64 `json:"text_bytes,omitempty"`
+	// ElapsedMS is the observed call duration for recall events. It lives in the
+	// separate efficacy_recall_timing table so the event schema stays append-only
+	// and older ledgers keep reading without a column migration.
+	ElapsedMS *int64 `json:"elapsed_ms,omitempty"`
 }
 
 // Ledger stores append-only hook observation events in a separate SQLite file.
@@ -83,7 +87,7 @@ func (l *Ledger) initialize() error {
 	var version int
 	if err := l.db.QueryRow("PRAGMA user_version").Scan(&version); err == nil && version == ledgerVersion {
 		var readyCnt int
-		if l.db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('efficacy_meta', 'efficacy_event_scope_harness', 'efficacy_event_target')").Scan(&readyCnt) == nil && readyCnt == 3 {
+		if l.db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('efficacy_meta', 'efficacy_event_scope_harness', 'efficacy_event_target', 'efficacy_recall_timing')").Scan(&readyCnt) == nil && readyCnt == 4 {
 			return nil
 		}
 	}
@@ -132,7 +136,12 @@ func (l *Ledger) initialize() error {
 			value TEXT NOT NULL
 		);
 		CREATE INDEX IF NOT EXISTS efficacy_event_scope_harness ON efficacy_event(scope, harness, seq);
-			CREATE INDEX IF NOT EXISTS efficacy_event_target ON efficacy_event(target_event_id, seq)`); err != nil {
+			CREATE INDEX IF NOT EXISTS efficacy_event_target ON efficacy_event(target_event_id, seq);
+			CREATE TABLE IF NOT EXISTS efficacy_recall_timing (
+				event_id TEXT PRIMARY KEY,
+				elapsed_ms INTEGER NOT NULL,
+				recorded_at INTEGER NOT NULL
+			)`); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -298,7 +307,21 @@ func (l *Ledger) Append(event LedgerEvent) error {
 			return errors.New("ledger event ID conflicts with existing event")
 		}
 	}
+	if event.ElapsedMS != nil {
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO efficacy_recall_timing(event_id, elapsed_ms, recorded_at) VALUES (?, ?, ?)`, event.EventID, *event.ElapsedMS, time.Now().UnixNano()); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
+}
+
+// RecallTiming returns the recorded call duration for a recall event.
+func (l *Ledger) RecallTiming(eventID string) (int64, bool) {
+	var elapsed int64
+	if err := l.db.QueryRow(`SELECT elapsed_ms FROM efficacy_recall_timing WHERE event_id = ?`, eventID).Scan(&elapsed); err != nil {
+		return 0, false
+	}
+	return elapsed, true
 }
 
 func sameLedgerEvent(a, b LedgerEvent) bool {
@@ -309,6 +332,7 @@ func sameLedgerEvent(a, b LedgerEvent) bool {
 		return false
 	}
 	a.TextBytes, b.TextBytes = nil, nil
+	a.ElapsedMS, b.ElapsedMS = nil, nil
 	return a == b
 }
 
@@ -355,9 +379,12 @@ func validateLedgerEvent(e LedgerEvent) error {
 	if e.Observation != "observed" && e.Observation != "unknown" {
 		return errors.New("invalid observation state")
 	}
+	if e.ElapsedMS != nil && *e.ElapsedMS < 0 {
+		return errors.New("invalid elapsed time")
+	}
 	if e.Observation == "unknown" || e.Action == "retraction" {
-		if e.TextSHA256 != "" || e.TextBytes != nil {
-			return errors.New("unknown or retracted event cannot contain text measurements")
+		if e.TextSHA256 != "" || e.TextBytes != nil || e.ElapsedMS != nil {
+			return errors.New("unknown or retracted event cannot contain measurements")
 		}
 	} else {
 		decoded, err := hex.DecodeString(e.TextSHA256)
@@ -380,7 +407,10 @@ func (l *Ledger) Events(after int64, limit int) ([]LedgerEntry, error) {
 	if after < 0 || limit <= 0 || limit > 10000 {
 		return nil, errors.New("invalid ledger cursor or limit")
 	}
-	rows, err := l.db.Query(`SELECT seq, event_id, execution_id, session, scope, harness, hook, output_outcome, action, target_event_id, observed_at, observation, text_sha256, text_bytes FROM efficacy_event WHERE seq > ? ORDER BY seq LIMIT ?`, after, limit)
+	rows, err := l.db.Query(`SELECT e.seq, e.event_id, e.execution_id, e.session, e.scope, e.harness, e.hook, e.output_outcome, e.action, e.target_event_id, e.observed_at, e.observation, e.text_sha256, e.text_bytes, t.elapsed_ms
+		FROM efficacy_event e
+		LEFT JOIN efficacy_recall_timing t ON t.event_id = e.event_id
+		WHERE e.seq > ? ORDER BY e.seq LIMIT ?`, after, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -388,12 +418,15 @@ func (l *Ledger) Events(after int64, limit int) ([]LedgerEntry, error) {
 	entries := []LedgerEntry{}
 	for rows.Next() {
 		var entry LedgerEntry
-		var textBytes sql.NullInt64
-		if err := rows.Scan(&entry.Sequence, &entry.EventID, &entry.ExecutionID, &entry.Session, &entry.Scope, &entry.Harness, &entry.Hook, &entry.OutputOutcome, &entry.Action, &entry.TargetEventID, &entry.ObservedAt, &entry.Observation, &entry.TextSHA256, &textBytes); err != nil {
+		var textBytes, elapsed sql.NullInt64
+		if err := rows.Scan(&entry.Sequence, &entry.EventID, &entry.ExecutionID, &entry.Session, &entry.Scope, &entry.Harness, &entry.Hook, &entry.OutputOutcome, &entry.Action, &entry.TargetEventID, &entry.ObservedAt, &entry.Observation, &entry.TextSHA256, &textBytes, &elapsed); err != nil {
 			return nil, err
 		}
 		if textBytes.Valid {
 			entry.TextBytes = &textBytes.Int64
+		}
+		if elapsed.Valid {
+			entry.ElapsedMS = &elapsed.Int64
 		}
 		entries = append(entries, entry)
 	}

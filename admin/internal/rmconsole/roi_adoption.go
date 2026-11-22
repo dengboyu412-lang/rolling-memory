@@ -33,16 +33,6 @@ type roiAdoptionAuditSummary struct {
 	AdoptionRatePct     float64
 }
 
-type zcodeRecallCallWindow struct {
-	sessionID string
-	callID    string
-	startMS   int64
-	endMS     int64
-	nextMS    int64
-	cue       string
-	output    string
-}
-
 type followupCorpusPair struct {
 	harnessID   string
 	toolCorpus  string
@@ -436,385 +426,9 @@ type settledNoeticAdoptionEntry struct {
 var (
 	settledNoeticAdoptionMu    sync.Mutex
 	settledNoeticAdoptionCache = map[string]settledNoeticAdoptionEntry{}
-	zcodeCallPairCacheMu       sync.Mutex
-	zcodeCallPairCache         = map[string]followupCorpusPair{}
-	zcodeRecallCallsMu         sync.Mutex
-	zcodeRecallCallsCache      []zcodeRecallCallWindow
-	zcodeRecallCallsWatermark  int64
-	zcodeRecallCallsMinFloorMS int64
 	noeticWarmRunningMu        sync.Mutex
 	noeticWarmRunning          bool
 )
-
-func loadCachedZCodeRecallCalls(ctx context.Context, zdb *sql.DB, minSec int64) []zcodeRecallCallWindow {
-	zcodeRecallCallsMu.Lock()
-	defer zcodeRecallCallsMu.Unlock()
-
-	floorMS := (minSec - 30) * 1000
-	if floorMS <= 0 {
-		floorMS = time.Now().Add(-14 * 24 * time.Hour).UnixMilli()
-	}
-	queryFromMS := zcodeRecallCallsWatermark
-	expandedBackwards := false
-	if queryFromMS <= 0 || zcodeRecallCallsMinFloorMS <= 0 || floorMS < zcodeRecallCallsMinFloorMS {
-		queryFromMS = floorMS
-		expandedBackwards = zcodeRecallCallsMinFloorMS > 0 && floorMS < zcodeRecallCallsMinFloorMS
-		zcodeRecallCallsMinFloorMS = floorMS
-	}
-
-	qCtx, cancel := context.WithTimeout(ctx, 2500*time.Millisecond)
-	defer cancel()
-	tRows, err := zdb.QueryContext(qCtx, `
-		SELECT session_id, tool_call_id, coalesce(started_at, 0), coalesce(completed_at, 0)
-		FROM tool_usage
-		WHERE started_at >= ?
-		  AND tool_name IN ('mcp__plugin_rolling-memory_rolling-memory__recall', 'mcp__rolling-memory__recall', 'rolling-memory:rolling-memory__recall')
-		ORDER BY started_at ASC
-	`, queryFromMS)
-	if err == nil {
-		seenCall := make(map[string]bool, len(zcodeRecallCallsCache)+32)
-		for _, existing := range zcodeRecallCallsCache {
-			seenCall[existing.callID] = true
-		}
-		maxStart := zcodeRecallCallsWatermark
-		added := 0
-		for tRows.Next() {
-			var c zcodeRecallCallWindow
-			if tRows.Scan(&c.sessionID, &c.callID, &c.startMS, &c.endMS) == nil && c.sessionID != "" && c.callID != "" {
-				if c.endMS <= 0 {
-					c.endMS = c.startMS
-				}
-				if c.startMS > maxStart {
-					maxStart = c.startMS
-				}
-				if !seenCall[c.callID] {
-					seenCall[c.callID] = true
-					zcodeRecallCallsCache = append(zcodeRecallCallsCache, c)
-					added++
-				}
-			}
-		}
-		tRows.Close()
-		if maxStart > zcodeRecallCallsWatermark {
-			zcodeRecallCallsWatermark = maxStart
-		}
-		if added > 0 {
-			if expandedBackwards {
-				sort.Slice(zcodeRecallCallsCache, func(i, j int) bool {
-					return zcodeRecallCallsCache[i].startMS < zcodeRecallCallsCache[j].startMS
-				})
-			}
-			const maxCachedRecallCalls = 16384
-			if len(zcodeRecallCallsCache) > maxCachedRecallCalls {
-				zcodeRecallCallsCache = zcodeRecallCallsCache[len(zcodeRecallCallsCache)-maxCachedRecallCalls:]
-				if len(zcodeRecallCallsCache) > 0 {
-					zcodeRecallCallsMinFloorMS = zcodeRecallCallsCache[0].startMS
-				}
-			}
-			nextBySession := make(map[string]int64, 64)
-			for i := len(zcodeRecallCallsCache) - 1; i >= 0; i-- {
-				sid := zcodeRecallCallsCache[i].sessionID
-				zcodeRecallCallsCache[i].nextMS = zcodeRecallCallsCache[i].endMS + 240*1000
-				if nxt, ok := nextBySession[sid]; ok && nxt > zcodeRecallCallsCache[i].startMS && nxt < zcodeRecallCallsCache[i].nextMS {
-					zcodeRecallCallsCache[i].nextMS = nxt
-				}
-				nextBySession[sid] = zcodeRecallCallsCache[i].startMS
-			}
-		}
-	}
-	out := make([]zcodeRecallCallWindow, len(zcodeRecallCallsCache))
-	copy(out, zcodeRecallCallsCache)
-	return out
-}
-
-// loadZCodeFollowupCorpora queries the ZCode host SQLite DB using covering indexes
-// (tool_usage_started_tool_idx + message_session_time_created_id_idx + part_message_sequence_idx)
-// for the most recent L3 Noetic events when inspecting the default user production vault.
-func loadZCodeFollowupCorpora(ctx context.Context, home, memoryPath string, events []roiNoeticEvent) (map[string]followupCorpusPair, map[string]bool) {
-	out := make(map[string]followupCorpusPair)
-	completed := make(map[string]bool, len(events))
-	if strings.TrimSpace(home) == "" || len(events) == 0 {
-		for _, ev := range events {
-			completed[ev.NoeticID] = true
-		}
-		return out, completed
-	}
-	defaultPath := filepath.Join(home, ".local", "share", "rolling-memory", "memory.db")
-	if filepath.Clean(memoryPath) != filepath.Clean(defaultPath) {
-		for _, ev := range events {
-			completed[ev.NoeticID] = true
-		}
-		return out, completed
-	}
-	zdb, err := memoryRODB(filepath.Join(home, ".zcode", "cli", "db", "db.sqlite"))
-	if err != nil || zdb == nil {
-		for _, ev := range events {
-			completed[ev.NoeticID] = true
-		}
-		return out, completed
-	}
-
-	limit := len(events)
-	if limit > 100 {
-		limit = 100
-	}
-	subset := events[:limit]
-	minSec := subset[len(subset)-1].OccurredAt
-	for _, ev := range subset {
-		if ev.OccurredAt > 0 && (minSec == 0 || ev.OccurredAt < minSec) {
-			minSec = ev.OccurredAt
-		}
-	}
-	if minSec <= 0 {
-		return out, completed
-	}
-
-	calls := loadCachedZCodeRecallCalls(context.Background(), zdb, minSec)
-	if len(calls) == 0 {
-		for _, ev := range subset {
-			completed[ev.NoeticID] = true
-		}
-		return out, completed
-	}
-
-	qCtx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
-	defer cancel()
-
-	// Match each Noetic event (in deterministic newest-first order) to its corresponding ZCode recall tool call within ±15s.
-	type matchedPair struct {
-		noeticID string
-		callIdx  int
-	}
-	usedCall := make(map[int]bool, len(subset))
-	var orderedMatches []matchedPair
-	for _, ev := range subset {
-		evMS := ev.OccurredAt * 1000
-		bestIdx := -1
-		bestDiff := int64(15000)
-		for idx, c := range calls {
-			if usedCall[idx] {
-				continue
-			}
-			diff := c.endMS - evMS
-			if diff < 0 {
-				diff = -diff
-			}
-			if diff <= bestDiff {
-				bestDiff = diff
-				bestIdx = idx
-			}
-		}
-		if bestIdx >= 0 {
-			usedCall[bestIdx] = true
-			orderedMatches = append(orderedMatches, matchedPair{noeticID: ev.NoeticID, callIdx: bestIdx})
-		} else {
-			completed[ev.NoeticID] = true
-		}
-	}
-
-	// For each matched call in deterministic newest-first order, query the covering index on
-	// message(session_id, time_created, id) and collect subsequent tool inputs and assistant replies.
-	nowMS := time.Now().UnixMilli()
-	for _, mp := range orderedMatches {
-		noeticID := mp.noeticID
-		c := calls[mp.callIdx]
-		if c.callID != "" {
-			zcodeCallPairCacheMu.Lock()
-			cachedPair, hasCachedPair := zcodeCallPairCache[c.callID]
-			zcodeCallPairCacheMu.Unlock()
-			if hasCachedPair {
-				completed[noeticID] = true
-				out[noeticID] = cachedPair
-				continue
-			}
-		}
-		if qCtx.Err() != nil {
-			break
-		}
-		seenMID := make(map[string]bool, 16)
-		var mids []any
-		var marks []string
-		addMID := func(mid string) {
-			if mid != "" && !seenMID[mid] {
-				seenMID[mid] = true
-				mids = append(mids, mid)
-				marks = append(marks, "?")
-			}
-		}
-
-		// Step A: Always include the 4 most recent messages at or before c.startMS in this session
-		// (using covering index message_session_time_created_id_idx), because an assistant turn
-		// message is always created at or before its tool part's c.startMS!
-		if preRows, preErr := zdb.QueryContext(qCtx, `
-			SELECT m.id
-			FROM message m
-			WHERE m.session_id = ? AND m.time_created <= ?
-			ORDER BY m.time_created DESC
-			LIMIT 4
-		`, c.sessionID, c.startMS); preErr == nil {
-			var preMIDs []string
-			for preRows.Next() {
-				var mid string
-				if preRows.Scan(&mid) == nil && mid != "" {
-					preMIDs = append(preMIDs, mid)
-				}
-			}
-			preRows.Close()
-			for i := len(preMIDs) - 1; i >= 0; i-- {
-				addMID(preMIDs[i])
-			}
-		}
-
-		// Step B: Include up to 14 subsequent messages in (c.startMS, c.nextMS].
-		if postRows, postErr := zdb.QueryContext(qCtx, `
-			SELECT m.id
-			FROM message m
-			WHERE m.session_id = ? AND m.time_created > ? AND m.time_created <= ?
-			ORDER BY m.time_created ASC
-			LIMIT 14
-		`, c.sessionID, c.startMS, c.nextMS); postErr == nil {
-			for postRows.Next() {
-				var mid string
-				if postRows.Scan(&mid) == nil {
-					addMID(mid)
-				}
-			}
-			postRows.Close()
-		}
-		if len(mids) == 0 {
-			if qCtx.Err() == nil {
-				completed[noeticID] = true
-			}
-			continue
-		}
-
-		midsWithCall := make([]any, 0, len(mids)+1)
-		midsWithCall = append(midsWithCall, c.callID)
-		midsWithCall = append(midsWithCall, mids...)
-
-		// Query without cross-message ORDER BY so SQLite scans part_message_sequence_idx directly
-		// with zero TEMP B-TREE sorting; we sort the small result slice in Go memory (<0.01ms).
-		pRows, pErr := zdb.QueryContext(qCtx, `
-			SELECT coalesce(p.time_created, 0),
-			       coalesce(p.sequence, 0),
-			       coalesce(json_extract(p.data, '$.type'), ''),
-			       coalesce(json_extract(p.data, '$.callID'), ''),
-			       coalesce(json_extract(p.data, '$.tool'), ''),
-			       coalesce(substr(json_extract(p.data, '$.state.input'), 1, 4096), ''),
-			       CASE WHEN json_extract(p.data, '$.callID') = ? THEN coalesce(substr(json_extract(p.data, '$.state.output'), 1, 16384), '') ELSE '' END,
-			       coalesce(substr(json_extract(p.data, '$.text'), 1, 8192), '')
-			FROM part p
-			WHERE p.message_id IN (`+strings.Join(marks, ",")+`)
-			  AND (
-			      instr(substr(p.data, 1, 140), '"tool"') > 0
-			      OR (
-			          (instr(substr(p.data, 1, 64), '"text"') > 0 OR instr(substr(p.data, 1, 64), '"reasoning"') > 0)
-			          AND COALESCE(json_extract(p.data, '$.synthetic'), 0) = 0
-			      )
-			  )
-		`, midsWithCall...)
-		if pErr != nil {
-			continue
-		}
-
-		type rawPartItem struct {
-			pTime       int64
-			pSeq        int64
-			pType       string
-			callID      string
-			toolName    string
-			stateInput  string
-			stateOutput string
-			textBody    string
-		}
-		var partItems []rawPartItem
-		for pRows.Next() {
-			var it rawPartItem
-			if pRows.Scan(&it.pTime, &it.pSeq, &it.pType, &it.callID, &it.toolName, &it.stateInput, &it.stateOutput, &it.textBody) == nil {
-				partItems = append(partItems, it)
-			}
-		}
-		pRows.Close()
-		sort.Slice(partItems, func(i, j int) bool {
-			if partItems[i].pTime != partItems[j].pTime {
-				return partItems[i].pTime < partItems[j].pTime
-			}
-			return partItems[i].pSeq < partItems[j].pSeq
-		})
-
-		var toolBuf, replyBuf strings.Builder
-		var deliveredOut, cueText string
-		seenRecallPart := false
-		for _, it := range partItems {
-			pTime, pType, callID, toolName, stateInput, stateOutput, textBody := it.pTime, it.pType, it.callID, it.toolName, it.stateInput, it.stateOutput, it.textBody
-			if pType == "tool" {
-				if callID == c.callID || strings.Contains(toolName, "recall") {
-					if callID == c.callID {
-						seenRecallPart = true
-						if stateOutput != "" {
-							deliveredOut = stateOutput
-						}
-						if stateInput != "" {
-							var inMap map[string]any
-							if json.Unmarshal([]byte(stateInput), &inMap) == nil {
-								if cueVal, ok := inMap["cue"].(string); ok && cueVal != "" {
-									cueText = cueVal
-								}
-							}
-						}
-					} else if seenRecallPart && pTime > c.endMS {
-						// Stop at the next recall invocation in the same session.
-						break
-					}
-					continue
-				}
-				if !seenRecallPart && pTime < c.startMS {
-					continue
-				}
-				if pTime > c.nextMS {
-					continue
-				}
-				if strings.TrimSpace(stateInput) != "" {
-					toolBuf.WriteString(stateInput)
-					toolBuf.WriteByte('\n')
-				}
-			} else if pType == "text" || pType == "reasoning" {
-				if !seenRecallPart && pTime < c.endMS {
-					continue
-				}
-				if pTime > c.nextMS {
-					continue
-				}
-				if strings.TrimSpace(textBody) != "" {
-					replyBuf.WriteString(textBody)
-					replyBuf.WriteByte('\n')
-				}
-			}
-		}
-		pair := followupCorpusPair{
-			harnessID:   "zcode",
-			toolCorpus:  toolBuf.String(),
-			replyCorpus: replyBuf.String(),
-			delivered:   deliveredOut,
-			cue:         cueText,
-		}
-		if qCtx.Err() == nil {
-			completed[noeticID] = true
-			if c.callID != "" && c.endMS > 0 && nowMS-c.endMS > 60000 {
-				zcodeCallPairCacheMu.Lock()
-				if len(zcodeCallPairCache) > 8192 {
-					zcodeCallPairCache = map[string]followupCorpusPair{}
-				}
-				zcodeCallPairCache[c.callID] = pair
-				zcodeCallPairCacheMu.Unlock()
-			}
-		}
-		if toolBuf.Len() > 0 || replyBuf.Len() > 0 || deliveredOut != "" {
-			out[noeticID] = pair
-		}
-	}
-	return out, completed
-}
 
 type vaultDocFollowupRow struct {
 	docID      string
@@ -871,7 +485,9 @@ func inferHarnessIDFromJSONLPath(path string) string {
 	case strings.Contains(lower, ".zcode"):
 		return "zcode"
 	default:
-		return "claude-code"
+		// Unknown layouts must stay unattributed instead of being silently
+		// credited to one host.
+		return ""
 	}
 }
 
@@ -1367,24 +983,7 @@ func discoverMultiHarnessJSONLFiles(home string, minUnixSec int64, extraPaths []
 		return out
 	}
 
-	patterns := []string{
-		filepath.Join(home, ".claude", "projects", "*", "*.jsonl"),
-		filepath.Join(home, ".claude", "projects", "*", "sessions", "*.jsonl"),
-		filepath.Join(home, ".workbuddy", "projects", "*", "*.jsonl"),
-		filepath.Join(home, ".workbuddy", "projects", "*", "sessions", "*.jsonl"),
-		filepath.Join(home, ".codebuddy", "projects", "*", "*.jsonl"),
-		filepath.Join(home, ".codebuddy", "projects", "*", "sessions", "*.jsonl"),
-		filepath.Join(home, ".codex", "sessions", "*", "*", "*", "*.jsonl"),
-		filepath.Join(home, ".codex", "sessions", "*.jsonl"),
-		filepath.Join(home, ".codex", "archived_sessions", "*.jsonl"),
-		filepath.Join(home, ".dsh", "sessions", "*.jsonl"),
-		filepath.Join(home, ".cursor", "projects", "*", "*.jsonl"),
-		filepath.Join(home, ".cursor", "sessions", "*.jsonl"),
-		filepath.Join(home, ".windsurf", "sessions", "*.jsonl"),
-		filepath.Join(home, ".cline", "sessions", "*.jsonl"),
-		filepath.Join(home, ".zcode", "projects", "*", "sessions", "*.jsonl"),
-	}
-	for _, pat := range patterns {
+	for _, pat := range hostTranscriptPatterns(home) {
 		matches, err := filepath.Glob(pat)
 		if err != nil {
 			continue
@@ -1515,14 +1114,15 @@ func loadMultiHarnessJSONLFollowupCorpora(home, memoryPath string, events []roiN
 	return out
 }
 
-// syncMultiHarnessJSONLRecallLedger imports recall tool invocations from non-ZCode JSONL
-// harness transcripts (Claude Code, Codex, WorkBuddy, CodeBuddy, DSH) into the sidecar
-// efficacy ledger idempotently by event_id.
+// syncMultiHarnessJSONLRecallLedger imports recall tool invocations from JSONL
+// harness transcripts into the sidecar efficacy ledger idempotently by event_id.
+// The host is inferred from the transcript path and left empty when the layout is
+// unknown, so no single host becomes the default attribution.
 func syncMultiHarnessJSONLRecallLedger(home, fp string, ldb *sql.DB) {
 	if strings.TrimSpace(home) == "" || fp == "" || ldb == nil {
 		return
 	}
-	minSec := time.Now().Add(-zcodeRecallLedgerLookback).Unix()
+	minSec := time.Now().Add(-hostRecallLedgerLookback).Unix()
 	files := discoverMultiHarnessJSONLFiles(home, minSec, nil)
 	if len(files) == 0 {
 		return
@@ -1610,7 +1210,7 @@ func loadVaultFollowupDocs(ctx context.Context, db *sql.DB, home, memoryPath str
 	}
 	refTexts := make(map[hydrateRef]string, len(refWarmRows))
 	if len(refWarmRows) > 0 {
-		warmHydrateZCodePointersBatch(home, memoryPath, refWarmRows)
+		warmHydratePointersBatch(home, memoryPath, refWarmRows)
 		for _, row := range refWarmRows {
 			if text, ok := hydratedPointerRowText(row); ok {
 				refTexts[hydrateRef{DocID: strings.TrimSpace(asString(row["id"])), Ref: strings.TrimSpace(asString(row["content"]))}] = text
@@ -1803,8 +1403,6 @@ func auditNoeticStreamAdoption(ctx context.Context, db *sql.DB, home, memoryPath
 	}
 	settledNoeticAdoptionMu.Unlock()
 
-	var zcodeMap map[string]followupCorpusPair
-	var zcodeCompleted map[string]bool
 	var vaultDocs []vaultDocFollowupRow
 	var jsonlMap map[string]followupCorpusPair
 	if len(uncachedEvents) > 0 {
@@ -1814,7 +1412,6 @@ func auditNoeticStreamAdoption(ctx context.Context, db *sql.DB, home, memoryPath
 				minOcc = uncachedEvents[i].OccurredAt
 			}
 		}
-		zcodeMap, zcodeCompleted = loadZCodeFollowupCorpora(ctx, home, memoryPath, uncachedEvents)
 		var extraJSONLPaths []string
 		vaultDocs, extraJSONLPaths = loadVaultFollowupDocs(ctx, db, home, memoryPath, minOcc)
 		jsonlMap = loadMultiHarnessJSONLFollowupCorpora(home, memoryPath, uncachedEvents, extraJSONLPaths)
@@ -1862,24 +1459,7 @@ func auditNoeticStreamAdoption(ctx context.Context, db *sql.DB, home, memoryPath
 			var toolBuf, replyBuf strings.Builder
 			queryCue := ev.QueryText
 			inferredHarness := ""
-			if zPair, hasZCodeSession := zcodeMap[ev.NoeticID]; hasZCodeSession {
-				inferredHarness = "zcode"
-				if zPair.delivered != "" {
-					delivBuf.WriteString(zPair.delivered)
-					delivBuf.WriteByte('\n')
-				}
-				if zPair.cue != "" && queryCue == "" {
-					queryCue = zPair.cue
-				}
-				if zPair.toolCorpus != "" {
-					toolBuf.WriteString(zPair.toolCorpus)
-					toolBuf.WriteByte('\n')
-				}
-				if zPair.replyCorpus != "" {
-					replyBuf.WriteString(zPair.replyCorpus)
-					replyBuf.WriteByte('\n')
-				}
-			} else if jPair, hasJSONLSession := jsonlMap[ev.NoeticID]; hasJSONLSession {
+			if jPair, hasJSONLSession := jsonlMap[ev.NoeticID]; hasJSONLSession {
 				inferredHarness = jPair.harnessID
 				if jPair.delivered != "" {
 					delivBuf.WriteString(jPair.delivered)
@@ -1908,7 +1488,7 @@ func auditNoeticStreamAdoption(ctx context.Context, db *sql.DB, home, memoryPath
 					}
 				}
 				// Bound the vault doc window to [ev.OccurredAt, nextRecallOccurredAt] (up to +600s)
-				// for non-ZCode harnesses and isolated unit-test databases.
+				// for every harness and isolated unit-test databases.
 				nextOcc := ev.OccurredAt + 600
 				if i > 0 && stream[i-1].OccurredAt > ev.OccurredAt && stream[i-1].OccurredAt < nextOcc {
 					nextOcc = stream[i-1].OccurredAt
@@ -1956,7 +1536,9 @@ func auditNoeticStreamAdoption(ctx context.Context, db *sql.DB, home, memoryPath
 			if (ev.AssistantID == "" || ev.AssistantID == "default") && inferredHarness != "" {
 				ev.AssistantID = inferredHarness
 			}
-			if ev.OccurredAt > 0 && nowUnix-ev.OccurredAt > 600 && (outcome != "pending" || zcodeCompleted[ev.NoeticID]) {
+			// The follow-up window closes after ten minutes for every harness, so an
+			// audit result (including "pending": no evidence found) can be cached then.
+			if ev.OccurredAt > 0 && nowUnix-ev.OccurredAt > 600 {
 				newSettled[cleanMemPath+"\x00"+ev.NoeticID] = settledNoeticAdoptionEntry{
 					outcome:     ev.AdoptionOutcome,
 					matched:     ev.MatchedAnchors,

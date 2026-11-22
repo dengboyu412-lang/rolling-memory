@@ -81,14 +81,14 @@
             <Icon :color="configStore.getColorValue('headerBarTabColor')" class="nav-menu-icon" v-else name="lucide-maximize" :size="18" />
         </div>
 
-        <!-- 全局版本更新入口：仅在有新版本时出现 -->
+        <!-- 全局版本更新入口：有新版本或更新基线缺失时出现 -->
         <div
-            v-if="updateState?.update_available"
+            v-if="updateState?.update_available || updateState?.needs_source_baseline"
             class="nav-menu-item nav-update-item"
             role="button"
             tabindex="0"
-            :title="t('plugin.rolling-memory.systemUpdate.globalBadge')"
-            :aria-label="t('plugin.rolling-memory.systemUpdate.globalBadge')"
+            :title="updateBadgeTitle"
+            :aria-label="updateBadgeTitle"
             data-testid="btn-global-update"
             @click="showSystemUpdateDialog = true"
             @keydown.enter.prevent="showSystemUpdateDialog = true"
@@ -197,8 +197,9 @@ import { useUpdateStatus } from '@/views/admin/plugin/rolling-memory/useUpdateSt
 import { ElMessage } from 'element-plus'
 import { upperFirst } from 'lodash-es'
 import screenfull from 'screenfull'
-import { defineAsyncComponent, reactive, ref, useTemplateRef } from 'vue'
+import { computed, defineAsyncComponent, reactive, ref, useTemplateRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useRoute } from 'vue-router'
 import Config from './config.vue'
 
 const SystemUpdateDialog = defineAsyncComponent(() => import('@/views/admin/plugin/rolling-memory/systemUpdateDialog.vue'))
@@ -209,16 +210,34 @@ const { toggleDark } = useDark()
 const adminInfo = useAdminInfo()
 const configStore = useConfig()
 const terminal = useTerminal()
+const route = useRoute()
 const reloadHotServerPopover = useTemplateRef('reloadHotServerPopover')
 const showSystemUpdateDialog = ref(false)
 const { state: updateState, refresh: refreshUpdateState } = useUpdateStatus({
     onOpen: () => {
         showSystemUpdateDialog.value = true
     },
+    autoRefresh: true,
 })
 const onSystemUpdateApplied = () => {
     void refreshUpdateState()
 }
+
+const updateBadgeTitle = computed(() =>
+    updateState.value?.update_available
+        ? t('plugin.rolling-memory.systemUpdate.globalBadge')
+        : t('plugin.rolling-memory.systemUpdate.baselineBadge')
+)
+
+// 进入仪表盘（含首次打开控制台落在仪表盘）立即触发一次版本检查；
+// 其余页面由 10 分钟兜底刷新与实时帧承接，避免每次路由切换都打网络。
+watch(
+    () => route.name,
+    (name) => {
+        if (name === 'dashboard') void refreshUpdateState(true)
+    },
+    { immediate: true }
+)
 
 const state = reactive({
     isFullScreen: false,

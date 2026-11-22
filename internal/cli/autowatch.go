@@ -495,8 +495,8 @@ const harnessEpisodeSyncMetaKey = "harness_episodic_synced_mtime"
 // keep the auto-sync gate permanently dirty.
 func harnessTranscriptPatterns(home string) []string {
 	var patterns []string
-	for _, id := range []string{"zcode", "claude-code", "codex", "dsh", "codebuddy", "workbuddy", "doubao"} {
-		if !harnessTurnsScannable(id) {
+	for _, id := range harness.SupportedIDs(home) {
+		if !harness.TurnsScannable(id) {
 			continue
 		}
 		patterns = append(patterns, harness.TranscriptGlobs(home, id)...)
@@ -511,19 +511,7 @@ func harnessTranscriptPatterns(home string) []string {
 // nested JSONL file does not update its grandparent directory's mtime.
 func latestHarnessTranscriptMTime(home string) int64 {
 	latest := int64(0)
-	for _, rel := range []string{
-		filepath.Join(home, ".zcode", "cli", "db", "db.sqlite"),
-		filepath.Join(home, ".zcode", "cli", "db", "db.sqlite-wal"),
-		filepath.Join(home, ".zcode", "projects"),
-		filepath.Join(home, ".claude", "projects"),
-		filepath.Join(home, ".codex", "sessions"),
-		filepath.Join(home, ".codex", "archived_sessions"),
-		filepath.Join(harness.ResolveDSHHome(home), "sessions"),
-		filepath.Join(home, ".codebuddy", "projects"),
-		filepath.Join(home, ".workbuddy", "projects"),
-		filepath.Join(home, "Doubao", "exports"),
-		filepath.Join(home, ".doubao", "exports"),
-	} {
+	for _, rel := range harness.ActivityPaths(home) {
 		if st, err := os.Stat(rel); err == nil && st.ModTime().Unix() > latest {
 			latest = st.ModTime().Unix()
 		}

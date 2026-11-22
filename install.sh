@@ -283,6 +283,22 @@ printf '{"method":"%s","repo":"%s","ref":"%s","commit":"%s","asset":"%s","instal
   "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${DATA_DIR}/install.json"
 echo "[rolling-memory] Installed binary to ${TARGET_BIN} (linked in ${LINK_DIR})"
 
+# Seed update preferences that match how this binary arrived. A published
+# install follows stable releases and keeps itself current; a source build
+# tracks main and only notifies, because dev updates require a rebuild.
+install_channel="dev"
+install_auto="notify"
+if [ "${install_method}" = "release" ]; then
+  install_channel="stable"
+  install_auto="apply"
+fi
+"${TARGET_BIN}" config set update.channel "${install_channel}" >/dev/null 2>&1 || true
+"${TARGET_BIN}" config set update.auto "${install_auto}" >/dev/null 2>&1 || true
+case "${REPO_URL}" in
+  *gitee.com*) "${TARGET_BIN}" config set update.source gitee >/dev/null 2>&1 || true ;;
+esac
+"${TARGET_BIN}" update --schedule install --quiet >/dev/null 2>&1 || true
+
 path_block_posix() {
   printf '\n# >>> rolling-memory PATH >>>\n'
   printf 'export PATH="%s:$PATH"\n' "${LINK_DIR}"

@@ -33,12 +33,15 @@ export interface UpdateState {
 const NOTIFIED_KEY = 'rm.update.notifiedTag'
 const DISMISSED_KEY = 'rm.update.dismissedTag'
 const BASELINE_KEY = 'rm.update.baselineNotified'
+const AUTO_REFRESH_MS = 10 * 60 * 1000
 
 /**
  * 版本更新实时状态：订阅 rm/update WebSocket 房间，缓存变化由后端主动推帧。
- * 前端不做定时轮询；仅在实时通道不可用或重连时做一次 REST 兜底。
+ * 前端不做高频轮询；打开控制台 / 进入仪表盘时强制刷新一次，之后每 10 分钟
+ * 发一次轻量状态请求（后端仍按 10 分钟缓存周期执行检查），实时通道正常时
+ * 检查结果仍由推送帧承载。
  */
-export function useUpdateStatus(options: { onOpen?: () => void } = {}) {
+export function useUpdateStatus(options: { onOpen?: () => void; autoRefresh?: boolean } = {}) {
     const { t } = useI18n()
     const adminInfo = useAdminInfo()
     const state = ref<UpdateState | null>(null)
@@ -46,6 +49,7 @@ export function useUpdateStatus(options: { onOpen?: () => void } = {}) {
     let socket: MonitorSocket | null = null
     let fallbackInFlight = false
     let lastFallbackAt = 0
+    let refreshTimer: ReturnType<typeof setInterval> | null = null
 
     const notify = (payload: UpdateState | null) => {
         if (!payload?.update_available || !payload.latest_tag) return
@@ -107,7 +111,7 @@ export function useUpdateStatus(options: { onOpen?: () => void } = {}) {
             const res = await request<any>({
                 url: '/admin/plugin/rolling-memory/system/update/status',
                 method: 'POST',
-                data: {},
+                data: force ? { force: true } : {},
                 timeout: 8000,
             })
             const payload = res?.data?.data ?? res?.data
@@ -145,12 +149,21 @@ export function useUpdateStatus(options: { onOpen?: () => void } = {}) {
             },
         })
         socket.start()
+        if (options.autoRefresh && !refreshTimer) {
+            refreshTimer = setInterval(() => {
+                void fetchOnce(true)
+            }, AUTO_REFRESH_MS)
+        }
     }
 
     const stop = () => {
         if (socket) {
             socket.stop()
             socket = null
+        }
+        if (refreshTimer) {
+            clearInterval(refreshTimer)
+            refreshTimer = null
         }
         connected.value = false
     }
@@ -160,5 +173,5 @@ export function useUpdateStatus(options: { onOpen?: () => void } = {}) {
     onDeactivated(stop)
     onBeforeUnmount(stop)
 
-    return { state, connected, refresh: () => fetchOnce(true) }
+    return { state, connected, refresh: (force = true) => fetchOnce(force) }
 }

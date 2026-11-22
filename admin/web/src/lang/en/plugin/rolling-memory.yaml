@@ -547,6 +547,7 @@ recall:
 systemUpdate:
     openBtn: Version & Update
     globalBadge: Update available — click to review and install
+    baselineBadge: Update baseline missing — click to establish version tracking
     dialogTitle: Version & Online Self-Update (SHA-256 Verified · Git-Free)
     safetyNotice: Opening this dialog only reads local SHA-256 digests (zero network requests); the release channel is contacted only when you click "Check for Updates" or "Update Now". Updating replaces binaries, web assets, and host wiring in place and never touches or overwrites your local SQLite vault (memory.db).
     currentVerLbl: Installed Version
@@ -568,6 +569,16 @@ systemUpdate:
     channelHintStable: Published release tags only
     channelHintBeta: Includes prerelease tags; artifacts stay SHA-256 verified
     channelHintDev: Tracks the latest main commit; release installs need one source baseline first, then a source rebuild; never replaces the binary automatically
+    updateAutoLbl: Background updates
+    autoOff: Off (manual checks only)
+    autoNotify: Notify only (recommended)
+    autoApply: Install automatically (background)
+    autoHintOff: No background checks; this window still checks on demand
+    autoHintNotify: Checks in the background and notifies; installation stays yours to confirm
+    autoHintApply: Downloads, verifies and installs in the background; the console restarts smoothly
+    autoHintDev: Dev builds require a source rebuild; background runs only check and notify
+    autoSaved: Background update policy saved
+    autoScheduleFailed: 'Policy saved, but the scheduled task could not be installed: {error}'
     channelLbl: Release Channel / Mirror URL
     channelPlaceholder: Uses the selected update source (enter a mirror URL for Custom)
     compCol: Component
@@ -594,6 +605,9 @@ systemUpdate:
     notifyMessage: Click to review the {tag} update
     notifySourceOnly: New version {tag} found (no prebuilt artifact on this channel; click for update options)
     sourceOnlyTitle: This version has no directly installable prebuilt artifact
+    switchToStable: Switch to stable and check
+    fallbackTitle: Prebuilt artifacts found on GitHub
+    fallbackHint: The selected mirror has no installable artifacts; this check and update use the GitHub release assets.
     sourceOnlyHint: 'This install is source-based, or the channel has not attached binaries for {tag} yet. Re-run the installer for {tag}, or run git fetch --tags && git checkout {tag} in the source checkout and rebuild.'
     baselineTag: Source baseline needed
     baselineTitle: The dev channel needs one source install as a baseline

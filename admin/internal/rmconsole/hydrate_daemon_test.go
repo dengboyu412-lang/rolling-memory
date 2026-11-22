@@ -343,7 +343,7 @@ func TestWarmHydrateBatchVerifiesEachDocument(t *testing.T) {
 		{"content": ref},
 		{"id": "doc-missing", "content": "@ref:jsonl:/missing:0#0"},
 	}
-	warmHydrateZCodePointersBatch(home, filepath.Join(home, "memory.db"), rows)
+	warmHydratePointersBatch(home, filepath.Join(home, "memory.db"), rows)
 	if len(*calls) != 1 {
 		t.Fatalf("calls = %d", len(*calls))
 	}
@@ -523,7 +523,7 @@ func TestPointerRowSnapshotDoesNotCacheVerifiedText(t *testing.T) {
 	if err != nil || len(first) != 1 {
 		t.Fatalf("pointer rows = %+v, %v", first, err)
 	}
-	warmHydrateZCodePointersBatch(home, dbPath, first)
+	warmHydratePointersBatch(home, dbPath, first)
 	if text, ok := hydratedPointerRowText(first[0]); !ok || text != "verified" {
 		t.Fatalf("first row = %q, %v", text, ok)
 	}

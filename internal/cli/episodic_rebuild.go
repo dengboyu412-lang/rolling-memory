@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/rocareer/rolling-memory/internal/harness"
 	"github.com/rocareer/rolling-memory/internal/memory/facade"
 	"github.com/rocareer/rolling-memory/sdk/go/public/tokenzr"
 )
@@ -82,7 +83,10 @@ func rebuildEpisodicUnits(ctx context.Context, memory *facade.Memory, apply bool
 
 	home, _ := os.UserHomeDir()
 	newUnits := map[string]candidateEpisodicTurn{}
-	for _, harnessID := range []string{"zcode", "claude-code", "codex", "dsh"} {
+	for _, harnessID := range harness.SupportedIDs(home) {
+		if !harness.TurnsScannable(harnessID) {
+			continue
+		}
 		if err := ctx.Err(); err != nil {
 			return report, err
 		}

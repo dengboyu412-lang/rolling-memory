@@ -1,9 +1,13 @@
 package database
 
 import (
+	"bytes"
+	"log"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -219,6 +223,39 @@ func TestBootstrapSQLiteUpgradesLegacyEvalTaskItemTable(t *testing.T) {
 	}
 }
 
+// A fresh database never had cloud_hits; the retirement migration must not
+// issue a DROP COLUMN that the driver would log as an error on every startup.
+func TestBootstrapSQLiteSkipsMissingRetiredColumn(t *testing.T) {
+	dsn := filepath.Join(t.TempDir(), "rolling-admin-retired-column.db") +
+		"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
+	var logs bytes.Buffer
+	db, err := gorm.Open(sqlite.New(sqlite.Config{DriverName: "sqlite", DSN: dsn}), &gorm.Config{
+		Logger: logger.New(log.New(&logs, "", 0), logger.Config{
+			SlowThreshold: time.Second,
+			LogLevel:      logger.Error,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("打开临时 SQLite 库失败: %v", err)
+	}
+	t.Cleanup(func() {
+		if sqlDB, err := db.DB(); err == nil {
+			_ = sqlDB.Close()
+		}
+	})
+	for i := 0; i < 2; i++ {
+		if err := BootstrapSQLite(db); err != nil {
+			t.Fatalf("BootstrapSQLite #%d: %v", i+1, err)
+		}
+	}
+	if strings.Contains(logs.String(), "cloud_hits") {
+		t.Fatalf("启动探测了已下线的列: %s", logs.String())
+	}
+	if tableHasColumn(db, "plugin_rolling_memory_eval_task_item", "cloud_hits") {
+		t.Fatal("fresh table unexpectedly carries cloud_hits")
+	}
+}
+
 func TestBootstrapSQLitePreservesCustomizedMenuAndPermissions(t *testing.T) {
 	db := openBootstrapTestDB(t)
 	if err := BootstrapSQLite(db); err != nil {
@@ -276,6 +313,7 @@ func TestBootstrapSQLiteSeedsRMConsoleRouteNodes(t *testing.T) {
 		"plugin/rolling-memory/maintenance/prune",
 		"plugin/rolling-memory/maintenance/space",
 		"plugin/rolling-memory/system/update/source",
+		"plugin/rolling-memory/system/update/auto",
 	} {
 		var count int64
 		if err := db.Raw(`SELECT COUNT(*) FROM admin_rules WHERE name = ? AND type = 'node' AND status = 1`, name).Scan(&count).Error; err != nil {

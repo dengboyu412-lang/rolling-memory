@@ -47,6 +47,7 @@ type roiFactEffectiveRow struct {
 	Bytes        sql.NullInt64
 	ObservedAt   int64
 	EffectiveSeq int64
+	Scope        string
 }
 
 type roiFactCounts struct {
@@ -669,8 +670,8 @@ func warmHydrateLocalDocumentsBatch(home string, rows []map[string]any) {
 	}
 }
 
-// warmHydrateZCodePointersBatch keeps verified text only in the caller-owned rows.
-func warmHydrateZCodePointersBatch(home, dbPath string, rows []map[string]any) {
+// warmHydratePointersBatch keeps verified text only in the caller-owned rows.
+func warmHydratePointersBatch(home, dbPath string, rows []map[string]any) {
 	refs := make([]hydrateRef, 0, len(rows))
 	seen := make(map[hydrateRef]bool, len(rows))
 	for _, r := range rows {
@@ -702,46 +703,35 @@ func hydratedPointerRowText(r map[string]any) (string, bool) {
 	return text, checked && text != ""
 }
 
-// zcodeRecallLedgerLookback 是宿主库首次导入的回溯窗口。宿主库
-// （~/.zcode/cli/db/db.sqlite）由外部进程持续读写、体量在 GB 级：只回溯近期流水即可满足
-// 面板 1h / 24h / 7d / 30d 窗口，避免对无索引谓词做全表扫。
-const zcodeRecallLedgerLookback = 30 * 24 * time.Hour
+// hostRecallLedgerLookback 是宿主 transcript 首次导入的回溯窗口：只回溯近期
+// 流水即可满足面板 1h / 24h / 7d / 30d 窗口，避免对大目录做全量扫描。
+const hostRecallLedgerLookback = 30 * 24 * time.Hour
 
 var (
-	zcodeLedgerSyncMu      sync.Mutex
-	zcodeLedgerSyncRunning bool
+	recallLedgerSyncMu      sync.Mutex
+	recallLedgerSyncRunning bool
 )
 
-// triggerProductionRecallLedgerSync 以单飞方式在后台导入宿主 MCP recall 流水。
-// 宿主库是外部在读写的 GB 级实时库，导入绝不阻塞控制台读接口：本轮快照少读一段，
-// 下一轮补齐（导入按 event_id 幂等）。
+// triggerProductionRecallLedgerSync 以单飞方式在后台导入宿主 transcript 中的
+// recall 流水。导入绝不阻塞控制台读接口：本轮快照少读一段，下一轮补齐
+// （导入按 event_id 幂等）。
 func triggerProductionRecallLedgerSync(home, memoryPath string) {
-	zcodeLedgerSyncMu.Lock()
-	if zcodeLedgerSyncRunning {
-		zcodeLedgerSyncMu.Unlock()
+	recallLedgerSyncMu.Lock()
+	if recallLedgerSyncRunning {
+		recallLedgerSyncMu.Unlock()
 		return
 	}
-	zcodeLedgerSyncRunning = true
-	zcodeLedgerSyncMu.Unlock()
+	recallLedgerSyncRunning = true
+	recallLedgerSyncMu.Unlock()
 
 	go func() {
 		defer func() {
-			zcodeLedgerSyncMu.Lock()
-			zcodeLedgerSyncRunning = false
-			zcodeLedgerSyncMu.Unlock()
+			recallLedgerSyncMu.Lock()
+			recallLedgerSyncRunning = false
+			recallLedgerSyncMu.Unlock()
 		}()
 		syncProductionRecallLedger(home, memoryPath)
 	}()
-}
-
-// readZcodeToolWatermark 返回已导入的宿主 recall 流水水位（毫秒时间戳；0 表示尚未导入）。
-func readZcodeToolWatermark(ldb *sql.DB) int64 {
-	var raw string
-	if err := ldb.QueryRow(`SELECT value FROM efficacy_meta WHERE key = 'zcode_tool_watermark'`).Scan(&raw); err != nil {
-		return 0
-	}
-	ms, _ := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
-	return ms
 }
 
 // readAdminLedgerFingerprint 只读读取账本已绑定的 db_fingerprint；文件缺失、
@@ -782,9 +772,11 @@ func rotateAdminLedgerEpoch(ledgerPath string) error {
 }
 
 // syncProductionRecallLedger idempotently merges any rotated .epoch-* sidecar
-// ledgers and ingests completed MCP recall tool_usage records from the local
-// ZCode host database into the production efficacy ledger. It is strictly no-op
-// whenever ROLLING_MEMORY_DB is set or when memoryPath is a test database.
+// ledgers and imports recall calls recorded inside host transcripts into the
+// production efficacy ledger. MCP calls made through Rolling-Memory already
+// record themselves with timing and outcome, so no host-private store is
+// required. It is strictly no-op whenever ROLLING_MEMORY_DB is set or when
+// memoryPath is a test database.
 func syncProductionRecallLedger(home, memoryPath string) {
 	if strings.TrimSpace(home) == "" || strings.TrimSpace(os.Getenv("ROLLING_MEMORY_DB")) != "" {
 		return
@@ -833,6 +825,11 @@ func syncProductionRecallLedger(home, memoryPath string) {
 		CREATE TABLE IF NOT EXISTS efficacy_meta (
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS efficacy_recall_timing (
+			event_id TEXT PRIMARY KEY,
+			elapsed_ms INTEGER NOT NULL,
+			recorded_at INTEGER NOT NULL
 		);
 		PRAGMA user_version = 1;
 	`)
@@ -891,6 +888,23 @@ func syncProductionRecallLedger(home, memoryPath string) {
 						failed = true
 					}
 					rows.Close()
+					if !failed {
+						if tRows, tErr := edb.Query(`SELECT event_id, elapsed_ms, recorded_at FROM efficacy_recall_timing`); tErr == nil {
+							for tRows.Next() {
+								var evID string
+								var elapsed, recorded int64
+								if tRows.Scan(&evID, &elapsed, &recorded) == nil {
+									if _, err := tx.Exec(`INSERT OR IGNORE INTO efficacy_recall_timing(event_id, elapsed_ms, recorded_at) VALUES (?, ?, ?)`, evID, elapsed, recorded); err != nil {
+										failed = true
+									}
+								}
+							}
+							if tRows.Err() != nil {
+								failed = true
+							}
+							tRows.Close()
+						}
+					}
 					if failed {
 						_ = tx.Rollback()
 					} else if err := tx.Commit(); err == nil {
@@ -909,130 +923,11 @@ func syncProductionRecallLedger(home, memoryPath string) {
 		}
 	}
 
-	// 2. Sync real MCP recall tool calls from all JSONL harnesses (Claude Code, Codex, WorkBuddy, CodeBuddy, DSH)
-	//    as well as the ZCode host tool_usage table.
+	// 2. Import recall calls recorded inside host transcripts. MCP calls made through
+	//    Rolling-Memory already land in this ledger with their own elapsed time; this
+	//    pass only fills in hosts whose transcripts are the only surviving record.
 	syncMultiHarnessJSONLRecallLedger(home, fp, ldb)
-
-	zdbPath := filepath.Join(home, ".zcode", "cli", "db", "db.sqlite")
-	zdb, zOpenErr := memoryRODB(zdbPath)
-	if zOpenErr != nil || zdb == nil {
-		return
-	}
-	// 以 started_at 水位增量扫描（命中宿主 tool_usage_started_tool_idx 的前缀列）；
-	// `tool_name IN (...)` 单独作谓词无索引可用，对 GB 级实时库会退化成全表扫。
-	watermarkMS := readZcodeToolWatermark(ldb)
-	if watermarkMS <= 0 {
-		watermarkMS = time.Now().Add(-zcodeRecallLedgerLookback).UnixMilli()
-	}
-	zRows, zErr := zdb.Query(`
-		SELECT tool_call_id, session_id, status, coalesce(started_at, 0), coalesce(completed_at, 0), coalesce(output_bytes, 0)
-		FROM tool_usage
-		WHERE started_at >= ?
-		  AND tool_name IN ('mcp__plugin_rolling-memory_rolling-memory__recall', 'mcp__rolling-memory__recall', 'rolling-memory:rolling-memory__recall')
-		ORDER BY started_at ASC
-	`, watermarkMS)
-	if zErr != nil {
-		return
-	}
-	defer zRows.Close()
-	tx, txErr := ldb.Begin()
-	if txErr != nil {
-		return
-	}
-	var maxStartedMS int64
-	var minRunningStartMS int64
-	for zRows.Next() {
-		var callID, sessID, status string
-		var startMS, endMS, outBytes int64
-		if zRows.Scan(&callID, &sessID, &status, &startMS, &endMS, &outBytes) != nil {
-			continue
-		}
-		callID = strings.TrimSpace(callID)
-		if callID == "" {
-			continue
-		}
-		if status == "running" {
-			// 进行中的调用不能被当成「空结果」固化：跳过不入账，并把水位回退到最早
-			// 进行中的调用起点，下一轮其状态落定后重新扫描、按真实 outcome 记一笔
-			// （旧行为按 start 时间插入 empty，完成后的 INSERT OR IGNORE 无法修正）。
-			if startMS > 0 && (minRunningStartMS == 0 || startMS < minRunningStartMS) {
-				minRunningStartMS = startMS
-			}
-			continue
-		}
-		tsMS := endMS
-		if tsMS <= 0 {
-			tsMS = startMS
-		}
-		if tsMS <= 0 {
-			continue
-		}
-		obsAt := tsMS * int64(time.Millisecond)
-		outcome := zcodeRecallToolOutcome(status, outBytes)
-		sum := sha256.Sum256([]byte("zcode\x00" + callID))
-		shaHex := hex.EncodeToString(sum[:])
-		sessSum := sha256.Sum256([]byte(fp + "\x00" + strings.TrimSpace(sessID)))
-		sessDigest := "s_" + hex.EncodeToString(sessSum[:])[:24]
-		_, _ = tx.Exec(`
-			INSERT OR IGNORE INTO efficacy_event(
-				event_id, execution_id, session, scope, harness, hook,
-				output_outcome, action, target_event_id, observed_at,
-				observation, text_sha256, text_bytes
-			) VALUES (?, ?, ?, 'mem:self', 'zcode', 'mcp_recall:tool', ?, 'recall', '', ?, 'observed', ?, ?)
-		`, "zcode_"+callID, shaHex[:32], sessDigest, outcome, obsAt, shaHex, outBytes)
-		if startMS > maxStartedMS {
-			maxStartedMS = startMS
-		}
-	}
-	_ = tx.Commit()
-	// 自愈校准：早期守护进程在未携带宿主环境变量时将 ZCode 触发的直写行（mcp_recall:<mode>）
-	// 误标为 harness='cli'，此处与已落盘的 zcode 回填孪生行（±2s 同窗口）对齐还原为 'zcode'。
-	_, _ = ldb.Exec(`
-			UPDATE efficacy_event
-			SET harness = 'zcode'
-			WHERE harness = 'cli'
-			  AND action = 'recall'
-			  AND hook LIKE 'mcp_recall:%'
-			  AND hook != 'mcp_recall:tool'
-			  AND EXISTS (
-				SELECT 1 FROM efficacy_event t
-				WHERE t.scope = efficacy_event.scope
-				  AND t.harness = 'zcode'
-				  AND t.action = 'recall'
-				  AND t.hook = 'mcp_recall:tool'
-				  AND ABS(t.observed_at - efficacy_event.observed_at) <= 2000000000
-			  )
-		`)
-	// 水位只前进（写已提交之后落盘）：下轮导入从本次最大 started_at 接着扫。
-	// 尚有进行中的调用时，水位收回到最早那一笔的起点，保证其完成后会被重新扫到
-	// （已入账行按 INSERT OR IGNORE 幂等重放）。
-	maxStartedMS = zcodeToolWatermark(maxStartedMS, minRunningStartMS)
-	if maxStartedMS > 0 {
-		_, _ = ldb.Exec(`INSERT OR REPLACE INTO efficacy_meta(key, value) VALUES ('zcode_tool_watermark', ?)`, strconv.FormatInt(maxStartedMS, 10))
-		notifyStreamKindRefresh(streamKindROI)
-	}
-}
-
-// zcodeRecallToolOutcome 把一条 zcode tool_usage 记录映射成账本 outcome：
-// error/cancelled → error，零输出 → empty，其余 → hits（进行中的记录在调用方
-// 先行跳过，绝不入账）。
-func zcodeRecallToolOutcome(status string, outBytes int64) string {
-	if status == "error" || status == "cancelled" {
-		return "error"
-	}
-	if outBytes <= 0 {
-		return "empty"
-	}
-	return "hits"
-}
-
-// zcodeToolWatermark 决定本轮 zcode 导入的下一水位：存在进行中的调用时以最早一笔
-// 起点为准（其完成后必须被重新扫到），否则取本轮已入账的最大 started_at。
-func zcodeToolWatermark(maxStartedMS, minRunningStartMS int64) int64 {
-	if minRunningStartMS > 0 {
-		return minRunningStartMS
-	}
-	return maxStartedMS
+	notifyStreamKindRefresh(streamKindROI)
 }
 
 // openVaultReadOnly opens the memory database read-only. It returns nil when the
@@ -1484,27 +1379,24 @@ func computeROIFactsVaultBundle(memoryPath string) (vaultAnalyticsBundle, string
 		var lVer int
 		if ldb.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&lVer) == nil && lVer == 1 {
 			scanSQL := `
-					SELECT e.action, e.output_outcome, coalesce(e.text_bytes, 0), e.observed_at
+					SELECT e.action, e.output_outcome, coalesce(e.text_bytes, 0), e.observed_at, e.hook, e.scope
 					FROM efficacy_event e
 					WHERE e.action IN ('recall', 'output_attempt') AND e.observation = 'observed' AND e.text_bytes > 0`
-			// 仅当账本确有直写孪生行时才需要反连接；否则整段相关子查询可证明为空操作。
-			if _, siblings, shapeOK := roiLedgerShape(ctx, ldb); !shapeOK || siblings {
-				scanSQL += `
-					  AND (e.hook != 'mcp_recall:tool' OR NOT EXISTS (
-						SELECT 1 FROM efficacy_event d
-						WHERE d.scope = e.scope
-						  AND d.action = 'recall'
-						  AND d.hook LIKE 'mcp_recall:%'
-						  AND d.hook != 'mcp_recall:tool'
-						  AND d.observed_at BETWEEN e.observed_at - 2000000000 AND e.observed_at + 2000000000
-					  ))`
+			// 宿主工具流水会与守护进程直写行重复记录同一次召回；先一次性取出
+			// 直写行时间索引，再在内存中剔除孪生工具行，避免逐行执行相关 LIKE 反连接。
+			siblingAt, siblingErr := roiRecallSiblingTimestamps(ctx, ldb)
+			if siblingErr != nil {
+				siblingAt = nil
 			}
 			lRows, lErr := ldb.QueryContext(ctx, scanSQL)
 			if lErr == nil {
 				for lRows.Next() {
-					var act, outc string
+					var act, outc, hook, rowScope string
 					var tBytes, obsAt int64
-					if lRows.Scan(&act, &outc, &tBytes, &obsAt) != nil || tBytes <= 0 {
+					if lRows.Scan(&act, &outc, &tBytes, &obsAt, &hook, &rowScope) != nil || tBytes <= 0 {
+						continue
+					}
+					if hook == "mcp_recall:tool" && roiHasRecallSibling(rowScope, obsAt, siblingAt) {
 						continue
 					}
 					sec := obsAt / int64(time.Second)
@@ -1963,7 +1855,7 @@ func computeROIFactsVaultBundle(memoryPath string) (vaultAnalyticsBundle, string
 	}
 	refTexts := make(map[hydrateRef]string, len(refRows))
 	if len(refRows) > 0 {
-		warmHydrateZCodePointersBatch(home, memoryPath, refRows)
+		warmHydratePointersBatch(home, memoryPath, refRows)
 		for _, row := range refRows {
 			if text, ok := hydratedPointerRowText(row); ok {
 				refTexts[hydrateRef{DocID: strings.TrimSpace(asString(row["id"])), Ref: strings.TrimSpace(asString(row["content"]))}] = text
@@ -2329,14 +2221,66 @@ func computeROIFactsVaultBundle(memoryPath string) (vaultAnalyticsBundle, string
 	return out, sig
 }
 
-// roiLedgerRowQuery 是账本形状探测所需的最小查询面（*sql.DB 与 *sql.Tx 均满足）。
+// roiLedgerRowQuery 是账本形状探测与孪生索引读取所需的最小查询面
+// （*sql.DB 与 *sql.Tx 均满足）。
 type roiLedgerRowQuery interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+// roiRecallSiblingWindowNanos 是宿主工具流水与守护进程直写行被判为同一次
+// recall 的最大时间差：任一侧的 observed_at 落在对方 ±2s 内即视为孪生。
+const roiRecallSiblingWindowNanos int64 = 2 * int64(time.Second)
+
+// roiRecallSiblingTimestamps 一次性读出所有非 tool 的 MCP recall 直写行，
+// 按 scope 分组并按时间升序排列。调用方据此在内存中剔除重复的宿主工具行，
+// 代替在账本上逐行执行 O(N^2) 的相关 LIKE 反连接。
+func roiRecallSiblingTimestamps(ctx context.Context, q roiLedgerRowQuery) (map[string][]int64, error) {
+	rows, err := q.QueryContext(ctx, `
+		SELECT scope, observed_at FROM efficacy_event
+		WHERE action = 'recall' AND hook LIKE 'mcp_recall:%' AND hook <> 'mcp_recall:tool'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string][]int64)
+	for rows.Next() {
+		var scope string
+		var observedAt int64
+		if err := rows.Scan(&scope, &observedAt); err != nil {
+			return nil, err
+		}
+		out[scope] = append(out[scope], observedAt)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for scope := range out {
+		times := out[scope]
+		sort.Slice(times, func(i, j int) bool { return times[i] < times[j] })
+	}
+	return out, nil
+}
+
+// roiHasRecallSibling 报告同一 scope 内是否存在与 observedAt 相差不超过
+// ±2s 的直写 recall 行；scope 为空时不跨 scope 匹配。
+func roiHasRecallSibling(scope string, observedAt int64, siblings map[string][]int64) bool {
+	if observedAt <= 0 || len(siblings) == 0 {
+		return false
+	}
+	times := siblings[scope]
+	if len(times) == 0 {
+		return false
+	}
+	idx := sort.Search(len(times), func(i int) bool {
+		return times[i] >= observedAt-roiRecallSiblingWindowNanos
+	})
+	return idx < len(times) && times[idx] <= observedAt+roiRecallSiblingWindowNanos
 }
 
 // roiLedgerShape 判定账本是否含修订行（correction/retraction）与 MCP 直写孪生行
-// （hook 为非 tool 的 mcp_recall:*）。两者皆无时，有效集 LEFT JOIN 与反连接均可
-// 证明为空操作，直接扫描基表与完整 CTE 等价；查询失败返回 ok=false，调用方走完整路径。
+// （hook 为非 tool 的 mcp_recall:*）。两者皆无时，有效集派生视图可证明为空操作，
+// 直接扫描基表与完整 CTE 等价；查询失败返回 ok=false，调用方走完整路径。
 func roiLedgerShape(ctx context.Context, q roiLedgerRowQuery) (revisions bool, siblings bool, ok bool) {
 	var found int
 	if err := q.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM efficacy_event WHERE action IN ('correction', 'retraction'))`).Scan(&found); err != nil {
@@ -2425,13 +2369,14 @@ func queryROIFacts(ctx context.Context, memoryPath string, req roiFactsRequest) 
 	// A correction replaces its original observation; a retraction removes it.
 	// The scope and harness must match both the original and its revision.
 	const effective = `WITH effective AS (
-			SELECT seq, action, harness, hook, outcome, observation, text_bytes, observed_at, effective_seq
+			SELECT seq, action, harness, hook, outcome, observation, text_bytes, observed_at, effective_seq, scope
 			FROM (
 				SELECT e.seq, e.event_id, e.action, e.harness, e.hook, COALESCE(r.output_outcome, e.output_outcome) AS outcome,
 					COALESCE(r.observation, e.observation) AS observation,
 					CASE WHEN r.seq IS NULL THEN e.text_bytes ELSE r.text_bytes END AS text_bytes,
 					COALESCE(r.observed_at, e.observed_at) AS observed_at,
-					COALESCE(r.seq, e.seq) AS effective_seq
+					COALESCE(r.seq, e.seq) AS effective_seq,
+					e.scope AS scope
 				FROM efficacy_event e
 				LEFT JOIN efficacy_event r ON r.seq = (
 					SELECT x.seq FROM efficacy_event x
@@ -2442,29 +2387,22 @@ func queryROIFacts(ctx context.Context, memoryPath string, req roiFactsRequest) 
 					WHERE e.scope IN (?, ?) AND e.scope != '' AND (? = '' OR e.harness = ?)
 						AND e.action IN ('decision', 'prepared', 'output_attempt', 'recall')
 						AND (r.seq IS NULL OR r.action != 'retraction')
-						AND (e.hook != 'mcp_recall:tool' OR NOT EXISTS (
-							SELECT 1 FROM efficacy_event d
-							WHERE d.scope = e.scope
-							  AND d.action = 'recall'
-							  AND d.hook LIKE 'mcp_recall:%'
-							  AND d.hook != 'mcp_recall:tool'
-							  AND d.observed_at BETWEEN e.observed_at - 2000000000 AND e.observed_at + 2000000000
-						))
 				)
 				GROUP BY event_id
 				)`
 	revisions, siblings, shapeOK := roiLedgerShape(ctx, tx)
 	var rows *sql.Rows
-	if shapeOK && !revisions && !siblings {
-		// 无修订、无直写孪生行：基表即有效集，省去两次全表相关的派生/反连接。
+	if shapeOK && !revisions {
+		// 无修订行：基表即有效集；孪生工具行已在上方按内存索引去重，
+		// 无需再走逐个 event 的相关 LEFT JOIN 派生视图。
 		rows, err = tx.QueryContext(ctx, `
-				SELECT e.action, e.output_outcome, e.observation, e.harness, e.hook, e.text_bytes, e.observed_at, e.seq
+				SELECT e.action, e.output_outcome, e.observation, e.harness, e.hook, e.text_bytes, e.observed_at, e.seq, e.scope
 				FROM efficacy_event e
 				WHERE e.scope IN (?, ?) AND e.scope != '' AND (? = '' OR e.harness = ?)
 					AND e.action IN ('decision', 'prepared', 'output_attempt', 'recall')`,
 			scope, altScope, harness, harness)
 	} else {
-		rows, err = tx.QueryContext(ctx, effective+` SELECT action, outcome, observation, harness, hook, text_bytes, observed_at, effective_seq FROM effective`, scope, altScope, harness, harness)
+		rows, err = tx.QueryContext(ctx, effective+` SELECT action, outcome, observation, harness, hook, text_bytes, observed_at, effective_seq, scope FROM effective`, scope, altScope, harness, harness)
 	}
 	if err != nil {
 		return unknown("schema_or_query_error")
@@ -2472,7 +2410,7 @@ func queryROIFacts(ctx context.Context, memoryPath string, req roiFactsRequest) 
 	settled := []roiFactEffectiveRow{}
 	for rows.Next() {
 		var item roiFactEffectiveRow
-		if err := rows.Scan(&item.Action, &item.Outcome, &item.Observation, &item.Harness, &item.Hook, &item.Bytes, &item.ObservedAt, &item.EffectiveSeq); err != nil {
+		if err := rows.Scan(&item.Action, &item.Outcome, &item.Observation, &item.Harness, &item.Hook, &item.Bytes, &item.ObservedAt, &item.EffectiveSeq, &item.Scope); err != nil {
 			rows.Close()
 			return unknown("schema_or_query_error")
 		}
@@ -2483,6 +2421,22 @@ func queryROIFacts(ctx context.Context, memoryPath string, req roiFactsRequest) 
 		return unknown("database_unavailable")
 	}
 	rows.Close()
+	// 宿主工具流水与守护进程直写行记录的是同一次召回：按 scope + ±2s 窗口
+	// 在内存里去掉重复项，避免在账本上逐行执行 O(N^2) 的相关 LIKE 反连接。
+	if siblings {
+		siblingAt, sErr := roiRecallSiblingTimestamps(ctx, tx)
+		if sErr != nil {
+			return unknown("schema_or_query_error")
+		}
+		kept := settled[:0]
+		for _, item := range settled {
+			if item.Action == "recall" && item.Hook == "mcp_recall:tool" && roiHasRecallSibling(item.Scope, item.ObservedAt, siblingAt) {
+				continue
+			}
+			kept = append(kept, item)
+		}
+		settled = kept
+	}
 	// A single effective-set scan feeds the aggregate counts, the rolling
 	// windows and the recent tail; re-running the correlated-CTE per view
 	// triples the scan cost and blows the request budget on large ledgers.

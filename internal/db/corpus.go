@@ -100,7 +100,9 @@ func CountCorpusTerms(connection *sql.DB) (int, error) {
 // corpus whose event times collapse onto a few seconds carries a quadratic
 // neighbour bill: SameInstantPairs is the exact number of pairs such a corpus
 // presents to the bucket step, and PairsPerDoc is the multiplier it puts on the
-// neighbour layer.
+// neighbour layer. Units without a clock (occurred_at = 0, such as background
+// file slices) never enter a spacetime bucket and are excluded from the
+// distribution.
 type TimeConcentration struct {
 	Docs             int64   `json:"docs"`
 	DistinctInstants int64   `json:"distinct_instants"`
@@ -134,7 +136,7 @@ func ReadTimeConcentration(connection *sql.DB) (TimeConcentration, error) {
 		return out, nil
 	}
 	if err := connection.QueryRow(
-		`SELECT COUNT(*), COUNT(DISTINCT occurred_at) FROM rm_docs`,
+		`SELECT COUNT(*), COUNT(DISTINCT occurred_at) FROM rm_docs WHERE occurred_at > 0`,
 	).Scan(&out.Docs, &out.DistinctInstants); err != nil {
 		return out, err
 	}
@@ -142,12 +144,12 @@ func ReadTimeConcentration(connection *sql.DB) (TimeConcentration, error) {
 		return out, nil
 	}
 	if err := connection.QueryRow(
-		`SELECT COALESCE(MAX(group_size), 0) FROM (SELECT COUNT(*) AS group_size FROM rm_docs GROUP BY occurred_at)`,
+		`SELECT COALESCE(MAX(group_size), 0) FROM (SELECT COUNT(*) AS group_size FROM rm_docs WHERE occurred_at > 0 GROUP BY occurred_at)`,
 	).Scan(&out.LargestGroup); err != nil {
 		return out, err
 	}
 	if err := connection.QueryRow(
-		`SELECT COALESCE(SUM(group_size * (group_size - 1) / 2), 0) FROM (SELECT COUNT(*) AS group_size FROM rm_docs GROUP BY occurred_at)`,
+		`SELECT COALESCE(SUM(group_size * (group_size - 1) / 2), 0) FROM (SELECT COUNT(*) AS group_size FROM rm_docs WHERE occurred_at > 0 GROUP BY occurred_at)`,
 	).Scan(&out.SameInstantPairs); err != nil {
 		return out, err
 	}

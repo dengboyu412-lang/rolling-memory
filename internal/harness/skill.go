@@ -57,9 +57,6 @@ func resolveBaseSkillFile(options InstallOptions) string {
 		candidates = append(candidates,
 			filepath.Join(options.Home, ".local", "share", "rolling-memory", "skills", "rolling-memory", "SKILL.md"),
 		)
-		if pluginDir := resolvePluginCacheDir(filepath.Join(options.Home, ".zcode", "cli", "plugins", "cache"), "", DefaultName); pluginDir != "" {
-			candidates = append(candidates, filepath.Join(pluginDir, "skills", "rolling-memory", "SKILL.md"))
-		}
 		candidates = append(candidates, filepath.Join(options.Home, "Rolling-Memory", "skills", "rolling-memory", "SKILL.md"))
 	}
 	for _, candidate := range candidates {
@@ -140,7 +137,7 @@ func skillOwned(target string, raw []byte) bool {
 	return err == nil && string(owner) == skillDigest(raw)
 }
 
-func pluginSkillCurrent(plugin zcodePluginInfo, options InstallOptions) bool {
+func pluginSkillCurrent(plugin nativePluginInfo, options InstallOptions) bool {
 	if !plugin.HasSkill || plugin.SkillMD == "" {
 		return false
 	}

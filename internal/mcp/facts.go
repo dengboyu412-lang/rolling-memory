@@ -23,10 +23,12 @@ var (
 )
 
 // recordRecallFact appends one agent-initiated recall to the fact ledger: what
-// the tool returned and how large the delivery was, never what the agent later
-// did with it. The ledger is evidence, not a verdict, and it stores only a
-// content hash plus a byte count — the delivered text itself is never written.
-func recordRecallFact(memory *facade.Memory, presence *text.PresenceCoordinates, mode, outcome, delivered string) {
+// the tool returned, how long it took and how large the delivery was, never what
+// the agent later did with it. The ledger is evidence, not a verdict, and it
+// stores only a content hash plus a byte count — the delivered text itself is
+// never written. Timing is recorded by the memory server for every host, so
+// latency reporting never has to read a particular host's private store.
+func recordRecallFact(memory *facade.Memory, presence *text.PresenceCoordinates, mode, outcome, delivered string, elapsedMS int64) {
 	if memory == nil || memory.Config == nil {
 		return
 	}
@@ -84,6 +86,10 @@ func recordRecallFact(memory *facade.Memory, presence *text.PresenceCoordinates,
 			entry.TextSHA256 = ids.SHA256Hex(fp + "\x00" + delivered)
 			entry.TextBytes = &length
 			entry.Observation = "observed"
+			if elapsedMS >= 0 {
+				elapsed := elapsedMS
+				entry.ElapsedMS = &elapsed
+			}
 		}
 		ledger, err := efficacy.OpenBoundLedger(path, fp)
 		if err != nil {
@@ -116,7 +122,7 @@ func recallOutcome(structured any) string {
 }
 
 // recallHarness reads the host channel from presence coordinates
-// ("harness:zcode" -> "zcode"); an unknown channel stays empty.
+// ("harness:<id>" -> "<id>"); an unknown channel stays empty.
 func recallHarness(presence *text.PresenceCoordinates) string {
 	if presence == nil {
 		return ""

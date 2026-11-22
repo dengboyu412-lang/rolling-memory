@@ -6,17 +6,14 @@
 
 ---
 
-## 0. 早期阶段策略：新安装默认 `dev`
+## 0. 升级默认值：发布版安装跟随 `stable`
 
-Rolling Memory 仍处于早期开发阶段，所以新安装默认使用 **`dev`** 更新通道，跟随 `main` 最新提交。这是有意为之：修复与兼容性工作会先落到 `main`，项目希望早期用户不必等正式发版就能拿到。
+安装器会按二进制的来源写好更新偏好，大多数用户不需要自己选通道：
 
-等社区壮大、系统稳定、发版节奏固定之后，再重新评估这个默认值。在那之前：
+- **预编译安装** → `stable` 通道 + `apply` 后台策略。CLI 与控制台从经过校验的发布资产自动更新，替换完成后控制台会自动重启。
+- **源码安装** → `dev` 通道 + `notify` 策略。源码构建跟随 `main` 并提示新提交，但不会在开发者背后替换二进制。
 
-- 追求最大稳定性的用户可手动切换到 `stable`；
-- 想提前验证下一版的用户可用 `beta`；
-- 通道会保存为持久偏好，不是一次性参数。
-
-默认通道不会自动安装任何东西。`dev` 只报告 `main@<commit>`，并要求用户显式执行源码重建。
+两者都会保存为持久偏好，随时可以修改。想提前验证候选版本时可以切到 `beta`。更新只替换 CLI 二进制、控制台后端、前端静态资源与宿主接线，绝不修改本地 SQLite 明文金库（`memory.db`）。
 
 ---
 
@@ -71,7 +68,7 @@ powershell -ExecutionPolicy Bypass -File install.ps1 --ref main
 |---|---|---|
 | `stable` | 正式发布标签 / Release | 生产使用；最大可预测性 |
 | `beta` | 含预发布标签的发布版本 | 在保留 SHA-256 校验的前提下验证候选版本 |
-| `dev`（默认） | `main` 最新提交 | 早期用户；源码构建；最快拿到修复 |
+| `dev` | `main` 最新提交 | 源码构建；早期用户；最快拿到修复 |
 
 保存通道偏好：
 
@@ -97,8 +94,9 @@ rolling-memory update --check --channel stable
 
 默认值：
 
-- 没有配置文件、没有环境变量 → `dev`；
-- 已有配置文件但没有 `[update]` 段 → `dev`；
+- 没有配置文件、没有环境变量 → `stable`；
+- 已有配置文件但没有 `[update]` 段 → `stable`；
+- 安装器会为源码构建显式写入 `dev`，让开发者继续跟随 `main`；
 - `beta` / `stable` 始终可以手动选择。
 
 ### 2.1 `dev` 到底怎么工作
@@ -129,6 +127,32 @@ ROLLING_MEMORY_SOURCE_REF=main bash install.sh
 
 可用 `rolling-memory config set update.source gitee` 保存，也可在 **版本与更新 → 更新源** 中选择。单次检查可加 `--source gitee`。显式的 `--release-base` URL 或 `ROLLING_MEMORY_RELEASE_BASE` 仍然优先。Gitee 上只有标签、尚未附带产物时，检查会如实报告“仅源码更新”，不会给出无法成功的下载。
 
+### 2.4 后台更新
+
+`update.auto` 控制更新窗口之外的行为：
+
+| 策略 | 行为 |
+|---|---|
+| `off` | 不做后台检查；打开更新窗口仍可手动检查 |
+| `notify`（默认） | 每六小时检查一次，每个新版本通知一次；安装仍由用户确认 |
+| `apply` | 检查、下载、按 `SHA256SUMS` 校验、安装，并自动重启控制台 |
+
+修改方式：
+
+```bash
+rolling-memory config set update.auto notify
+rolling-memory config set update.auto apply
+rolling-memory config set update.auto off
+```
+
+也可在 **版本与更新 → 后台更新** 中选择。手动执行一次同样的策略：
+
+```bash
+rolling-memory update --auto
+```
+
+预编译安装默认写入 `apply`；源码安装默认写入 `notify`，因为 `dev` 更新需要重新构建而不是替换二进制。后台更新全程 SHA-256 校验、不触碰 `memory.db`，并且只在渠道确实附带可安装产物时执行；没有产物的版本会记为“仅源码更新”，不会反复重试下载。
+
 ---
 
 ## 3. 升级方式
@@ -138,6 +162,9 @@ ROLLING_MEMORY_SOURCE_REF=main bash install.sh
 ```bash
 # 只读检查
 rolling-memory update --check
+
+# 执行一次已保存的后台策略（off / notify / apply）
+rolling-memory update --auto
 
 # 只查最新标签，不下载产物
 rolling-memory update --check --tags-only
@@ -167,7 +194,7 @@ rolling-memory update --check --json
 4. **立即升级** 执行与 CLI 相同的 SHA-256 校验升级；
 5. 如果控制台自身被替换，会平滑重启并刷新页面。
 
-控制台通过本地实时通道接收版本状态，不做轮询。控制台关闭时，下次打开会立即显示缓存状态，并在后台补一次过期检查。
+打开控制台（进入仪表盘）会立即触发一次版本检查；控制台保持打开时每 10 分钟检查一次，结果沿本地实时通道原位推送。控制台关闭时，下次打开会立即显示缓存状态，并在后台补一次检查。
 
 ### 3.3 可选的本机定时检查
 
@@ -177,7 +204,7 @@ rolling-memory update --schedule status
 rolling-memory update --schedule remove
 ```
 
-会注册当前用户级任务（macOS launchd、Linux systemd user timer、Windows 任务计划程序），每六小时刷新缓存，并对每个新版本发送一次桌面通知。它不会自动安装更新，且沿用已保存的 `update.channel` 偏好。
+会注册当前用户级任务（macOS launchd、Linux systemd user timer、Windows 任务计划程序），每六小时执行一次 `update --auto`，并按已保存的 `update.auto` 策略决定只刷新缓存并通知，还是下载并安装经过校验的更新。任务同样沿用已保存的 `update.channel` 与 `update.source` 偏好。
 
 ### 3.4 重新执行安装脚本
 
@@ -201,7 +228,7 @@ go install github.com/rocareer/rolling-memory/cmd/rolling-memory@main
 go install github.com/rocareer/rolling-memory/cmd/rolling-memory@v0.0.7
 ```
 
-这种方式可能没有 `install.json`，控制台会把它视为缺少源码基线，并提示显式重建。
+这种方式可能没有 `install.json`；只要 Go 构建信息里带有源码 commit，控制台会把它作为只读基线用于 `dev` 通道比较；读不到时才视为缺少源码基线，并提示显式重建。
 
 ---
 
@@ -288,8 +315,8 @@ ROLLING_MEMORY_SOURCE_REF=v0.0.5 bash install.sh
 
 ## 7. 总结
 
-- 默认：`dev`，跟随 `main`；不会自动替换。
-- `stable` / `beta`：正式发布标签，SHA-256 校验。
-- 所有升级路径都是显式的：CLI、控制台、定时检查、安装脚本。
+- 默认：预编译安装为 `stable`，源码安装为 `dev`。
+- `stable` / `beta`：正式发布标签，SHA-256 校验；替换完成后控制台自动重启。
+- `update.auto`：`off` / `notify` / `apply`；预编译安装默认 `apply`。
+- CLI、控制台、后台策略、安装脚本四条升级路径始终可用。
 - 大版本或不兼容升级前，先备份金库与二进制。
-- 等社区与发版节奏成熟后，再重新评估默认通道。

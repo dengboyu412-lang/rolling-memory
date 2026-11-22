@@ -785,7 +785,7 @@ func queryMemoriesFromDB(dbPath string, req MemoriesQueryRequest) (MemoriesQuery
 					for i, r := range rows {
 						batchRows[i] = map[string]any{"id": r["id"], "content": r["text"]}
 					}
-					warmHydrateZCodePointersBatch(home, dbPath, batchRows)
+					warmHydratePointersBatch(home, dbPath, batchRows)
 					for i := range rows {
 						rows[i]["_hydrated_ref_text"] = batchRows[i]["_hydrated_ref_text"]
 						rows[i]["_hydrated_ref_checked"] = batchRows[i]["_hydrated_ref_checked"]
@@ -848,7 +848,7 @@ func queryMemoriesFromDB(dbPath string, req MemoriesQueryRequest) (MemoriesQuery
 		for i, r := range rows {
 			batchRows[i] = map[string]any{"id": r["id"], "content": r["text"]}
 		}
-		warmHydrateZCodePointersBatch(home, dbPath, batchRows)
+		warmHydratePointersBatch(home, dbPath, batchRows)
 		for i := range rows {
 			rows[i]["_hydrated_ref_text"] = batchRows[i]["_hydrated_ref_text"]
 			rows[i]["_hydrated_ref_checked"] = batchRows[i]["_hydrated_ref_checked"]
@@ -907,7 +907,7 @@ func memoriesUnionSQL(dbPath string, req MemoriesQueryRequest) (string, []any) {
 			if home, hErr := os.UserHomeDir(); hErr == nil && home != "" {
 				if ptrRows, pErr := cachedVaultPointerDocRows(dbPath, layerListQuery{layer: layer, keyword: kw}); pErr == nil && len(ptrRows) > 0 {
 					cands := ptrRows
-					warmHydrateZCodePointersBatch(home, dbPath, cands)
+					warmHydratePointersBatch(home, dbPath, cands)
 					for _, r := range cands {
 						resolved, ok := hydratedPointerRowText(r)
 						if !ok || resolved == "" {
@@ -1468,6 +1468,9 @@ func runEngineCommand(ctx context.Context, bin, op string, args []string, reques
 		}
 		message := strings.TrimSpace(stderr.buffer.String())
 		if message == "" {
+			message = engineEnvelopeError(stdout.buffer.Bytes())
+		}
+		if message == "" {
 			message = err.Error()
 		}
 		return stdout.buffer.Bytes(), errors.New(message)
@@ -1481,6 +1484,27 @@ func runEngineCommand(ctx context.Context, bin, op string, args []string, reques
 func adminTestBinary() bool {
 	exe := filepath.Base(os.Args[0])
 	return strings.HasSuffix(exe, ".test") || strings.Contains(exe, ".test.")
+}
+
+// engineEnvelopeError extracts the failure text from the engine CLI's stdout
+// envelope. Under --json the CLI writes {"ok":false,"error":...} to stdout and
+// leaves stderr empty, so a non-zero exit alone would degrade to "exit status 1"
+// and hide the daemon's actual reason from the console.
+func engineEnvelopeError(raw []byte) string {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return ""
+	}
+	var envelope struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return ""
+	}
+	if envelope.OK {
+		return ""
+	}
+	return strings.TrimSpace(envelope.Error)
 }
 
 var (
@@ -2320,7 +2344,7 @@ func hydrateDashboardRecent(home, dbPath string, resp DashboardResponse) Dashboa
 	for i, item := range resp.RecentAssertions {
 		rows[i] = map[string]any{"id": item.ID, "content": item.Rendered}
 	}
-	warmHydrateZCodePointersBatch(home, dbPath, rows)
+	warmHydratePointersBatch(home, dbPath, rows)
 	for i, row := range rows {
 		if strings.HasPrefix(strings.TrimSpace(asString(row["content"])), "@ref:") {
 			if text, ok := hydratedPointerRowText(row); ok {
@@ -2450,35 +2474,10 @@ func computeDashboardData(home, reqScope string) DashboardResponse {
 	logStat := loadHookLogStat(logPath)
 	resp.TotalHookEvents = logStat.Total
 	resp.InjectedEvents = logStat.Injected
-	resp.LastRecallMS = logStat.LastMS
 	resp.RecentEvents = append([]HookEventItem{}, logStat.Recent...)
-	if len(logStat.Latency) > 0 {
-		latencies := logStat.Latency
-		start := len(latencies) - 20
-		if start < 0 {
-			start = 0
-		}
-		slice := latencies[start:]
-		last, avg, p50, max := recallLatencyStats(slice)
-		resp.LastRecallMS = last
-		resp.AvgRecallMS = avg
-		resp.LatencyP50MS = p50
-		resp.LatencyMaxMS = max
-		resp.LatencySamples = len(slice)
-		resp.LatencyTrend = recallLatencyTrend(p50, avg)
-		sparkStart := len(latencies) - 12
-		if sparkStart >= 0 {
-			resp.LatencySpark = append([]int{}, latencies[sparkStart:]...)
-		} else {
-			padCount := 12 - len(latencies)
-			sp := make([]int, 0, 12)
-			for i := 0; i < padCount; i++ {
-				sp = append(sp, resp.AvgRecallMS)
-			}
-			sp = append(sp, latencies...)
-			resp.LatencySpark = sp
-		}
-	}
+	// Recall latency comes only from the ledger's self-recorded timer below.
+	// Hook-log ms values measure prompt-hook runtime, not retrieval, so they
+	// must never become the card's headline.
 	for i, slot := range slotStarts {
 		resp.HookSpark[i] = logStat.hookSlot(slot)
 	}
@@ -2669,12 +2668,12 @@ func computeDashboardData(home, reqScope string) DashboardResponse {
 	}
 
 	// 趋势组装：L1 Background、L2 Episodic、L3 Noetic 认知结晶与 Recall 检索全量呈现。
-	// 召回腿以侧车事实账本为真源（MCP 直调 + 宿主工具流水按桶去重）：
+	// 召回腿以侧车事实账本为真源（MCP 直调 + 宿主 transcript 回填按桶去重）：
 	// 现行架构下 SessionStart / Stop 钩子已停用，UserPromptSubmit 仅做 4 轮节律提醒而不执行自动检索，
 	// 因此当事实账本存在真实 MCP recall 记录时，KPI 的「召回触发 / 有效命中」、趋势图与实时监控流
 	// 100% 采用 MCP recall 真实读数，彻底消除历史钩子日志（start/close 及节律空跑）对命中率的分母稀释；
 	// 仅在账本尚无记录的回退场景（如单测夹具）下使用钩子日志兜底。
-	recallLedger := loadRecallLedgerStat(home, dbPath, scope, start30DUnix)
+	recallLedger := loadRecallLedgerStat(dbPath, scope, start30DUnix)
 	hasMCPLedger := recallLedger.totalMCPRecalls > 0
 	if hasMCPLedger {
 		resp.TotalHookEvents = recallLedger.totalMCPRecalls
@@ -4028,7 +4027,7 @@ func assembleGraphDomain(dbPath, scope string, weights map[string]float64, weigh
 			graphRows = append(graphRows, map[string]any{"id": dm.docID, "content": dm.rawText})
 		}
 	}
-	warmHydrateZCodePointersBatch(graphHome, dbPath, graphRows)
+	warmHydratePointersBatch(graphHome, dbPath, graphRows)
 	graphTexts := make(map[hydrateRef]string, len(graphRows))
 	for _, row := range graphRows {
 		if text, ok := hydratedPointerRowText(row); ok {

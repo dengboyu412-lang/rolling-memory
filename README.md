@@ -209,7 +209,7 @@ rolling-memory update --release-base https://your-mirror.example.com/releases/la
 
 You can also click **Version & Update** in the top bar of the Web Console (`Memory Overview` or `Memory Console`) to inspect local SHA-256 digests, check for updates, and upgrade in place from the browser. Updating only swaps binaries, static web assets, and host wiring — it **never modifies or overwrites your local SQLite memory vault (`memory.db`)**.
 
-> **Early-stage default**: new installs follow the `dev` channel (`main`). Switch to `stable` or `beta` anytime with `rolling-memory config set update.channel stable` or the console's update dialog. See the full [Installation & Upgrade Guide](docs/install-upgrade.md) for channels, breaking changes, backups and rollback.
+> **Upgrade defaults**: published installs follow the `stable` channel and install verified updates in the background; source installs follow `dev` and notify. Switch channels or the `update.auto` policy anytime in the console's update dialog or with `rolling-memory config set update.channel`. See the full [Installation & Upgrade Guide](docs/install-upgrade.md) for channels, breaking changes, backups and rollback.
 
 ---
 

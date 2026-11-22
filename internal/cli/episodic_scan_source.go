@@ -63,7 +63,7 @@ func (s episodicScanSource) key() string {
 }
 
 func discoverEpisodicScanSources(ctx context.Context, home, harnessID string) ([]episodicScanSource, error) {
-	if !harnessTurnsScannable(harnessID) {
+	if !harness.TurnsScannable(harnessID) {
 		// The host is inventoried (the console counts its sessions) but this
 		// build cannot read its turn content. Enumerating its transcripts here
 		// would read gigabytes this build cannot parse, hold the shared scan
@@ -109,7 +109,7 @@ func discoverEpisodicScanSources(ctx context.Context, home, harnessID string) ([
 		}
 	}
 	if harnessID == "zcode" {
-		path := filepath.Join(home, ".zcode", "cli", "db", "db.sqlite")
+		path := harness.SessionStorePath(home, harnessID)
 		if _, err := os.Stat(path); err != nil {
 			if !os.IsNotExist(err) {
 				return nil, err

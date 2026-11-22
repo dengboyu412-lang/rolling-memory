@@ -7,18 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.12] - 2026-11-22
+
 ### Added
 
 - Doubao conversation exports saved under `~/Doubao/exports` (or `~/.doubao/exports`) can now be imported alongside the other supported harness transcripts.
+- Background updates are selectable in the console: `update.auto` supports `off`, `notify` (check and notify) and `apply` (download, verify and install). Published installs are seeded with `apply`; source installs are seeded with `notify`. The same policy can be run manually with `rolling-memory update --auto`.
+- `rolling-memory panel restart` stops and starts the local console from already installed assets, and the console uses it through a detached helper so a backend replacement no longer leaves the console stopped.
 
 ### Changed
 
+- Published installs now default to the `stable` update channel; the installer writes `dev` explicitly for source builds, so developers keep tracking `main`. Existing installations that saved `dev` can switch with `rolling-memory config set update.channel stable` (or the console's one-click switch) to receive binary updates.
+- The optional six-hour scheduled job now runs `update --auto` and follows the saved background policy instead of only refreshing the cache.
 - The admin console's sync status distinguishes history outside `sync.since`, incomplete turns, and excluded subagent sources from pending work, and lists stale and superseded knowledge entries separately.
 - Episodic scans reuse the longest already-scanned ZCode turn prefix, so repeated lookups of one long session no longer rescan it from the start.
 - The memory graph resolves word families from the published snapshot and caches each visible unit's hydration, so switching capacity, layer, or keyword filters no longer repeats the full projection.
 
 ### Fixed
 
+- A console-initiated update restarts the backend and frontend in a detached session; stopping the backend no longer kills the restart helper and leaves the console offline.
+- The update dialog shows an em dash instead of a hard-coded `0.0.1` when the local version has not loaded yet, and reloads only after the restarted backend answers again.
+- The admin console's recall latency no longer depends on one host's private tool log: the memory server records each recall's elapsed time in the fact ledger for every harness, and the card reports the median across all of them.
+- Realtime console freshness, auto-watch, the harness efficacy report, and the ROI adoption audit now cover every supported host through one adapter list instead of special-casing a single host; adoption reads the vault's episodic rows plus JSONL transcripts, not a host-private SQLite schema.
 - Recall keeps the clustered scoring path when an expansion budget is zero, instead of silently switching to the legacy scorer.
 - A recall call retries once when the local daemon retires between the health probe and the request, instead of returning a transient EOF.
 - Harness counts and their per-host cache now honor the `sync.since` ingest bound instead of reporting out-of-scope history as pending work.
@@ -238,7 +248,8 @@ Initial public release.
 - **Client SDK (`sdk/`)**: a zero-dependency Go SDK (`v1.11.3`) for local memory encoding and integration, with complete third-party license notices.
 - **Licensing**: source-available under **PolyForm Noncommercial 1.0.0** — free to use, modify, and share for noncommercial purposes; commercial use or distribution requires a separate license.
 
-[Unreleased]: https://github.com/rocareer/rolling-memory/compare/v0.0.11...HEAD
+[Unreleased]: https://github.com/rocareer/rolling-memory/compare/v0.0.12...HEAD
+[0.0.12]: https://github.com/rocareer/rolling-memory/compare/v0.0.11...v0.0.12
 [0.0.11]: https://github.com/rocareer/rolling-memory/compare/v0.0.10...v0.0.11
 [0.0.10]: https://github.com/rocareer/rolling-memory/compare/v0.0.9...v0.0.10
 [0.0.9]: https://github.com/rocareer/rolling-memory/compare/v0.0.8...v0.0.9

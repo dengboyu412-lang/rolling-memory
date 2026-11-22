@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/rocareer/rolling-memory/internal/config"
 	core "github.com/rocareer/rolling-memory/internal/core"
 )
 
@@ -69,13 +70,15 @@ func (v *Vault) canonicalSnapshotDocs(ctx context.Context) ([]vaultDocEntry, map
 	revs := make(map[string]int64, 4096)
 	for rows.Next() {
 		var entry vaultDocEntry
-		var coord64, metaRev int64
-		if err := rows.Scan(&entry.docID, &entry.layer, &entry.occ, &entry.docHash, &entry.blockHash,
+		var coord64, metaRev, docHash, blockHash int64
+		if err := rows.Scan(&entry.docID, &entry.layer, &entry.occ, &docHash, &blockHash,
 			&entry.lineStart, &entry.lineEnd, &entry.addrURI, &coord64, &entry.waveBar,
 			&entry.locus, &entry.refPointer, &metaRev); err != nil {
 			return nil, nil, err
 		}
 		entry.coord64 = uint64(coord64)
+		entry.docHash = uint64(docHash)
+		entry.blockHash = uint64(blockHash)
 		entry.docLen = 1
 		docs = append(docs, entry)
 		revs[entry.docID] = metaRev
@@ -135,14 +138,16 @@ func (v *Vault) canonicalSnapshotDocsFor(ctx context.Context, unitIDs []string) 
 		}
 		for rows.Next() {
 			var entry vaultDocEntry
-			var coord64, metaRev int64
-			if err := rows.Scan(&entry.docID, &entry.layer, &entry.occ, &entry.docHash, &entry.blockHash,
+			var coord64, metaRev, docHash, blockHash int64
+			if err := rows.Scan(&entry.docID, &entry.layer, &entry.occ, &docHash, &blockHash,
 				&entry.lineStart, &entry.lineEnd, &entry.addrURI, &coord64, &entry.waveBar,
 				&entry.locus, &entry.refPointer, &metaRev); err != nil {
 				rows.Close()
 				return nil, false
 			}
 			entry.coord64 = uint64(coord64)
+			entry.docHash = uint64(docHash)
+			entry.blockHash = uint64(blockHash)
 			entry.docLen = 1
 			out = append(out, entry)
 		}
@@ -481,6 +486,7 @@ func (v *Vault) loadCanonicalEngine(ctx context.Context) *core.Engine {
 		return nil
 	}
 	eng := core.NewEngine(idx)
+	eng.AnchorGate = config.AnchorGateEnabled()
 	eng.MaterializeClusterState()
 	return eng
 }

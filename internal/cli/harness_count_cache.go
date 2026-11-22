@@ -51,13 +51,11 @@ type harnessCountCache struct {
 // transcript files the scanner would read.
 func harnessStoreFingerprint(home, harnessID string) int64 {
 	patterns := harness.TranscriptGlobs(home, harnessID)
-	if harnessID == "zcode" {
-		// ZCode keeps interactive sessions in SQLite; its transcript files alone
-		// would miss a turn written straight to the database.
-		patterns = append([]string{
-			filepath.Join(home, ".zcode", "cli", "db", "db.sqlite"),
-			filepath.Join(home, ".zcode", "cli", "db", "db.sqlite-wal"),
-		}, patterns...)
+	if store := harness.SessionStorePath(home, harnessID); store != "" {
+		// Hosts that keep interactive sessions in SQLite need the database (and
+		// its WAL) in the fingerprint; transcript files alone would miss a turn
+		// written straight to the database.
+		patterns = append([]string{store, store + "-wal"}, patterns...)
 	}
 	if len(patterns) == 0 {
 		return 0

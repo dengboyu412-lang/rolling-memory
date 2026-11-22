@@ -20,7 +20,7 @@
                 <div class="su-ver-box">
                     <span class="su-ver-lbl">{{ t('plugin.rolling-memory.systemUpdate.currentVerLbl') }}</span>
                     <div class="su-ver-val">
-                        <strong>v{{ localInfo.current_version || '0.0.1' }}</strong>
+                        <strong>v{{ localInfo.current_version || '—' }}</strong>
                         <el-tag size="small" type="primary" effect="plain">
                             {{ localInfo.os || 'darwin' }}/{{ localInfo.arch || 'arm64' }}
                         </el-tag>
@@ -69,6 +69,26 @@
                 :title="t('plugin.rolling-memory.systemUpdate.sourceOnlyTitle')"
                 :description="checkResult.source_update || (checkResult.channel === 'dev' ? t('plugin.rolling-memory.systemUpdate.sourceOnlyHintDev') : t('plugin.rolling-memory.systemUpdate.sourceOnlyHint', { tag: latestDisplay }))"
             />
+            <el-alert
+                v-if="checkResult?.asset_fallback"
+                type="success"
+                :closable="false"
+                show-icon
+                class="su-alert"
+                data-testid="alert-asset-fallback"
+                :title="t('plugin.rolling-memory.systemUpdate.fallbackTitle')"
+                :description="t('plugin.rolling-memory.systemUpdate.fallbackHint')"
+            />
+            <el-button
+                v-if="checkResult?.channel === 'dev'"
+                size="small"
+                type="primary"
+                plain
+                data-testid="btn-switch-stable"
+                @click="switchToStable"
+            >
+                {{ t('plugin.rolling-memory.systemUpdate.switchToStable') }}
+            </el-button>
 
             <el-alert
                 v-if="checkResult?.channel === 'dev' && checkResult?.needs_source_baseline"
@@ -113,6 +133,27 @@
                     <el-option :label="t('plugin.rolling-memory.systemUpdate.channelDev')" value="dev" />
                 </el-select>
                 <span class="su-ver-muted">{{ channelHint }}</span>
+            </div>
+
+            <!-- 后台更新策略 -->
+            <div class="su-channel-bar">
+                <span class="su-channel-lbl">{{ t('plugin.rolling-memory.systemUpdate.updateAutoLbl') }}</span>
+                <el-select
+                    v-model="form.auto"
+                    size="small"
+                    style="width: 220px"
+                    data-testid="select-update-auto"
+                    @change="handleAutoChange"
+                >
+                    <el-option :label="t('plugin.rolling-memory.systemUpdate.autoOff')" value="off" />
+                    <el-option :label="t('plugin.rolling-memory.systemUpdate.autoNotify')" value="notify" />
+                    <el-option
+                        :label="t('plugin.rolling-memory.systemUpdate.autoApply')"
+                        value="apply"
+                        :disabled="form.channel === 'dev'"
+                    />
+                </el-select>
+                <span class="su-ver-muted">{{ autoHint }}</span>
             </div>
 
             <!-- 发布渠道 / 镜像源 URL -->
@@ -242,10 +283,11 @@ const { percent: checkPct } = useLoadingProgressText(checking, undefined, 1200)
 const { percent: applyPct } = useLoadingProgressText(applying, undefined, 2500)
 
 const localInfo = ref<any>({
-    current_version: '0.0.1',
+    current_version: '',
     os: 'darwin',
     arch: 'arm64',
     release_base: '',
+    update_auto: 'notify',
     cli: {},
     console: {},
 })
@@ -265,8 +307,9 @@ const sourceForBase = (base?: string) => {
 
 const form = ref({
     release_base: '',
-    channel: 'dev',
+    channel: 'stable',
     source: 'github',
+    auto: 'notify',
     with_console: true,
     refresh_harness: true,
     force: false,
@@ -280,7 +323,7 @@ const latestDisplay = computed(() => {
     if (result?.latest_tag) {
         return `v${result.latest_tag}`
     }
-    return `v${localInfo.value.current_version || '0.0.1'}`
+    return `v${localInfo.value.current_version || '—'}`
 })
 
 const channelHint = computed(() => {
@@ -291,6 +334,20 @@ const channelHint = computed(() => {
             return t('plugin.rolling-memory.systemUpdate.channelHintDev')
         default:
             return t('plugin.rolling-memory.systemUpdate.channelHintStable')
+    }
+})
+
+const autoHint = computed(() => {
+    if (form.value.channel === 'dev') {
+        return t('plugin.rolling-memory.systemUpdate.autoHintDev')
+    }
+    switch (form.value.auto) {
+        case 'off':
+            return t('plugin.rolling-memory.systemUpdate.autoHintOff')
+        case 'apply':
+            return t('plugin.rolling-memory.systemUpdate.autoHintApply')
+        default:
+            return t('plugin.rolling-memory.systemUpdate.autoHintNotify')
     }
 })
 
@@ -365,6 +422,9 @@ const loadLocalVersion = async () => {
             if (channel) {
                 form.value.channel = channel
             }
+            if (payload.update_auto) {
+                form.value.auto = payload.update_auto
+            }
             // 首帧直接展示后台缓存，避免打开弹窗先显示“未检查”。
             if (!checkResult.value && payload.update_state?.latest_tag && payload.update_state?.ok !== false) {
                 checkResult.value = payload.update_state
@@ -406,6 +466,32 @@ const handleReleaseBaseInput = () => {
     checkResult.value = null
 }
 
+const handleAutoChange = async () => {
+    try {
+        const res = await request<any>({
+            url: '/admin/plugin/rolling-memory/system/update/auto',
+            method: 'POST',
+            data: { auto: form.value.auto },
+        })
+        const payload = res?.data?.data ?? (res?.data as any)
+        if (payload?.schedule_error) {
+            ElMessage.warning(
+                t('plugin.rolling-memory.systemUpdate.autoScheduleFailed', { error: payload.schedule_error }),
+            )
+        } else {
+            ElMessage.success(t('plugin.rolling-memory.systemUpdate.autoSaved'))
+        }
+        await loadLocalVersion()
+    } catch {
+        // Error message already displayed by request interceptor.
+    }
+}
+
+const switchToStable = async () => {
+    form.value.channel = 'stable'
+    await handleChannelChange()
+}
+
 const handleChannelChange = async () => {
     try {
         await request({
@@ -413,6 +499,10 @@ const handleChannelChange = async () => {
             method: 'POST',
             data: { channel: form.value.channel },
         })
+        if (form.value.channel === 'dev' && form.value.auto === 'apply') {
+            form.value.auto = 'notify'
+            await handleAutoChange()
+        }
         checkResult.value = null
         await handleCheckUpdate()
     } catch {
@@ -458,6 +548,37 @@ const handleCheckUpdate = async () => {
     }
 }
 
+// The updater replaces the console backend and then restarts it from a
+// detached helper. Poll until the backend has gone away and come back so the
+// page reloads against the newly built frontend instead of the old bundle.
+const waitForConsoleRestart = async () => {
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+    let sawDown = false
+    for (let attempt = 0; attempt < 90; attempt += 1) {
+        try {
+            const response = await fetch('/admin/login-config', { cache: 'no-store' })
+            if (response.ok) {
+                if (sawDown) {
+                    window.location.reload()
+                    return
+                }
+            } else {
+                sawDown = true
+            }
+        } catch {
+            sawDown = true
+        }
+        if (!sawDown && attempt >= 20) {
+            // The helper may have completed before the first probe; reload
+            // rather than leaving the user on a stale page.
+            window.location.reload()
+            return
+        }
+        await sleep(1000)
+    }
+    window.location.reload()
+}
+
 const handleApplyUpdate = async () => {
     if (form.value.channel === 'dev') {
         ElMessage.warning(checkResult.value?.source_update || t('plugin.rolling-memory.systemUpdate.channelHintDev'))
@@ -493,9 +614,7 @@ const handleApplyUpdate = async () => {
         emit('updated')
         if (data.console_restart_deferred) {
             ElMessage.info(t('plugin.rolling-memory.systemUpdate.restartingNotice'))
-            setTimeout(() => {
-                window.location.reload()
-            }, 1800)
+            await waitForConsoleRestart()
         }
     } catch {
         // Error message already displayed by request interceptor

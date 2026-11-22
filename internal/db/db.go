@@ -141,8 +141,12 @@ func openSQLite(path string, profile StorageProfile, stats *SQLStats) (*sql.DB, 
 	// connection: database/sql may replace a pooled connection at any time, and a fresh
 	// connection with a zero busy timeout turns ordinary lock contention into instant
 	// SQLITE_BUSY while a missing foreign_keys silently drops constraint enforcement.
+	// recursive_triggers stays off so INSERT OR REPLACE keeps its implicit delete
+	// silent: the canonical writer compensates docs_cnt for the rewrite, and enabling
+	// recursion would fire the delete-side index, lineage and counter triggers as well.
 	dsn := dsnPath + "?_txlock=immediate&_pragma=busy_timeout(" + strconv.Itoa(profile.BusyTimeoutMS) + ")" +
 		"&_pragma=foreign_keys(1)" +
+		"&_pragma=recursive_triggers(0)" +
 		"&_pragma=synchronous(" + profile.Synchronous + ")" +
 		"&_pragma=temp_store(" + profile.TempStore + ")"
 	if profile.WALAutocheckpoint > 0 {

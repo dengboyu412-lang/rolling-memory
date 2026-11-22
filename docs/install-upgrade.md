@@ -6,17 +6,14 @@ This guide covers installation, update channels, every supported upgrade path, a
 
 ---
 
-## 0. Early-stage policy: new installs default to `dev`
+## 0. Upgrade defaults: published installs follow `stable`
 
-Rolling Memory is still in an early development stage. New installations therefore default to the **`dev`** update channel, which follows the latest commit on `main`. This is intentional: fixes and compatibility work land on `main` first, and the project wants early adopters to receive them without waiting for a release tag.
+The installer seeds update preferences that match how the binary arrived, so most users never have to choose a channel:
 
-This default will be revisited when the community grows and the release cadence stabilizes. Until then:
+- **published install** → `stable` channel and `apply` background policy. The CLI and console update themselves from verified release artifacts, and the console restarts automatically after the swap.
+- **source install** → `dev` channel and `notify` policy. A source build tracks `main` and reports new commits, but never replaces the binary behind the developer's back.
 
-- users who want maximum stability should switch to `stable`;
-- users who test upcoming releases can use `beta`;
-- the choice is a saved preference, not a one-time flag.
-
-The default never installs anything automatically. `dev` only reports `main@<commit>` and asks for an explicit source rebuild.
+Both choices are saved preferences and can be changed at any time. `beta` is available for testing release candidates. The memory vault (`memory.db`) is never modified by an update; only the CLI binary, console backend, web assets and host integrations are replaced.
 
 ---
 
@@ -71,7 +68,7 @@ Use the offline package and portable layout described in [usb-portable.md](usb-p
 |---|---|---|
 | `stable` | Published non-prerelease tags / releases | Production use; maximum predictability |
 | `beta` | Published tags including prereleases | Testing release candidates while keeping SHA-256 verification |
-| `dev` (default) | Latest `main` commit | Early adopters; source builds; fastest fixes |
+| `dev` | Latest `main` commit | Source builds; early adopters; fastest fixes |
 
 Switch the saved preference:
 
@@ -97,8 +94,9 @@ rolling-memory update --check --channel stable
 
 Defaults:
 
-- no config file and no environment variable → `dev`;
-- existing config files without an `[update]` section → `dev`;
+- no config file and no environment variable → `stable`;
+- existing config files without an `[update]` section → `stable`;
+- the installer writes `dev` explicitly for source builds, so developers keep tracking `main`;
 - `beta`/`stable` are always available as explicit choices.
 
 ### 2.1 What `dev` means in practice
@@ -129,6 +127,28 @@ Both channels use published release artifacts and verify them against `SHA256SUM
 
 Save it with `rolling-memory config set update.source gitee`, or choose it in **Version & Update → Update Source**. A one-off check can use `--source gitee`. An explicit `--release-base` URL or `ROLLING_MEMORY_RELEASE_BASE` still wins. If Gitee has tags but no attached artifacts yet, the check reports a source-only update and never offers a download that cannot succeed.
 
+### 2.4 Background updates
+
+`update.auto` controls what happens outside the update dialog:
+
+| Policy | Behavior |
+|---|---|
+| `off` | No background checks. The dialog still checks on demand. |
+| `notify` (default) | Checks every six hours and notifies once per new version; installation stays a user action. |
+| `apply` | Checks, downloads, verifies against `SHA256SUMS`, installs, and restarts the console automatically. |
+
+Change it with:
+
+```bash
+rolling-memory config set update.auto notify
+rolling-memory config set update.auto apply
+rolling-memory config set update.auto off
+```
+
+Or choose it in **Version & Update → Background Updates**. The same policy can be exercised manually with `rolling-memory update --auto`; this is the command the scheduled task runs.
+
+Published installs are seeded with `apply`; source installs are seeded with `notify`, because `dev` updates need a rebuild rather than a binary swap. Background updates are SHA-256 verified, never touch `memory.db`, and only act when the channel actually carries installable artifacts. A version without artifacts is recorded as a source-only update instead of being retried as a download failure.
+
 ---
 
 ## 3. Upgrade methods
@@ -138,6 +158,9 @@ Save it with `rolling-memory config set update.source gitee`, or choose it in **
 ```bash
 # Read-only check
 rolling-memory update --check
+
+# Run the saved background policy once (off / notify / apply)
+rolling-memory update --auto
 
 # Check the newest tag without downloading artifacts
 rolling-memory update --check --tags-only
@@ -167,7 +190,7 @@ Open **Version & Update** from the memory overview or the memory service page:
 4. **Update Now** runs the same SHA-256 verified update as the CLI;
 5. if the console itself is replaced, it restarts and reloads the page.
 
-The console receives version state over its local real-time channel; there is no polling. If the console is closed, the next open shows the cached state immediately and refreshes a stale snapshot once.
+Opening the console (entering the dashboard) triggers a version check immediately; while the console stays open it checks every 10 minutes, and results are pushed in place over the local real-time channel. If the console is closed, the next open shows the cached state immediately and refreshes it in the background.
 
 ### 3.3 Optional scheduled check
 
@@ -177,7 +200,7 @@ rolling-memory update --schedule status
 rolling-memory update --schedule remove
 ```
 
-This registers a user-level launchd agent (macOS), systemd user timer (Linux), or Windows scheduled task. Every six hours it refreshes the cache and sends one desktop notification per new version. It never installs an update. The job follows the saved `update.channel` preference.
+This registers a user-level launchd agent (macOS), systemd user timer (Linux), or Windows scheduled task. Every six hours it runs `update --auto`, which follows the saved `update.auto` policy: it may only refresh the cache and notify, or it may download and install a verified update. The job also follows the saved `update.channel` and `update.source` preferences.
 
 ### 3.4 Re-running the installer
 
@@ -201,7 +224,7 @@ go install github.com/rocareer/rolling-memory/cmd/rolling-memory@main
 go install github.com/rocareer/rolling-memory/cmd/rolling-memory@v0.0.7
 ```
 
-`install.json` may not exist for this method; the console then treats the channel as lacking a source baseline and asks for an explicit rebuild.
+`install.json` may not exist for this method. When the Go build information carries a source commit, the console uses it as a read-only baseline for the `dev` channel; only when no commit is available does it treat the channel as lacking a source baseline and ask for an explicit rebuild.
 
 ---
 
@@ -288,8 +311,8 @@ Downgrades are not a substitute for restoring a vault backup after an incompatib
 
 ## 7. Summary
 
-- Default: `dev`, following `main`; no automatic replacement.
-- Stable/beta: published tags, SHA-256 verified.
-- Every upgrade path is explicit: CLI, console, scheduled check, or installer.
+- Default: `stable` for published installs, `dev` for source builds.
+- Stable/beta: published tags, SHA-256 verified; the console restarts automatically after a swap.
+- `update.auto`: `off`, `notify` or `apply`; published installs default to `apply`.
+- Every upgrade path stays available: CLI, console, background policy, or installer.
 - Back up the vault and binary before a major or incompatible upgrade.
-- Revisit the default channel when the project’s community and release cadence mature.

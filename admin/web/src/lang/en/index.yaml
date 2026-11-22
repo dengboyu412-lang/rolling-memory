@@ -69,7 +69,7 @@ stepInstallText: Needs Go 1.26 or later. On macOS or Linux, this builds the prog
 stepCheckTitle: Check the connection
 stepCheckText: Confirms each agent can see the memory tool.
 stepAdjustTitle: Turn things off if you prefer
-stepAdjustText: In ZCode and Claude Code, the installer also adds a short reminder to each prompt that can bring in relevant past memory, and it keeps a small local record of whether recall helped, which feeds the console's stats. You can keep just the recall tool, switch the record off, or remove everything.
+stepAdjustText: In hosts that support hooks (for example ZCode, Claude Code, and Codex), the installer also adds a short reminder to each prompt that can bring in relevant past memory, and it keeps a small local record of whether recall helped, which feeds the console's stats. You can keep just the recall tool, switch the record off, or remove everything.
 adjustMcpOnly: Keep only the recall tool — remove the reminders and skill files, then reconnect
 adjustHooksOff: Turn off the local record of whether recall helped (this also turns off repeat filtering)
 adjustUninstall: Remove everything the installer added

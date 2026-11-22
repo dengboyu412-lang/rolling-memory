@@ -11,41 +11,6 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// TestZcodeRecallToolOutcome pins the running-row policy: a call still running
-// is never turned into an "empty" ledger entry; error/cancelled map to error
-// and a completed call with no output bytes maps to empty.
-func TestZcodeRecallToolOutcome(t *testing.T) {
-	for _, tc := range []struct {
-		status   string
-		outBytes int64
-		want     string
-	}{
-		{status: "completed", outBytes: 1200, want: "hits"},
-		{status: "completed", outBytes: 0, want: "empty"},
-		{status: "error", outBytes: 100, want: "error"},
-		{status: "cancelled", outBytes: 0, want: "error"},
-	} {
-		if got := zcodeRecallToolOutcome(tc.status, tc.outBytes); got != tc.want {
-			t.Fatalf("zcodeRecallToolOutcome(%q, %d) = %q, want %q", tc.status, tc.outBytes, got, tc.want)
-		}
-	}
-}
-
-// TestZcodeToolWatermark pins the watermark hold-back: while a call is still
-// running the next scan must restart at that call's start (so its completion is
-// imported with the real outcome), not beyond it.
-func TestZcodeToolWatermark(t *testing.T) {
-	if got := zcodeToolWatermark(5000, 3000); got != 3000 {
-		t.Fatalf("watermark with a running call = %d, want 3000", got)
-	}
-	if got := zcodeToolWatermark(5000, 0); got != 5000 {
-		t.Fatalf("watermark without running calls = %d, want 5000", got)
-	}
-	if got := zcodeToolWatermark(5000, 7000); got != 7000 {
-		t.Fatalf("watermark must not skip the running call = %d, want 7000", got)
-	}
-}
-
 func openTestSQLite(t *testing.T, path string) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", "file:"+path)

@@ -268,6 +268,18 @@ if (($env:PATH -split ';') -notcontains $InstallDir) {
 
 try { & $TargetBin init --write-config *> $null } catch {}
 
+# Seed update preferences that match how this binary arrived. A published
+# install follows stable releases and keeps itself current; a source build
+# tracks main and only notifies, because dev updates require a rebuild.
+$InstallChannel = if ($MetaMethod -eq "release") { "stable" } else { "dev" }
+$InstallAuto = if ($MetaMethod -eq "release") { "apply" } else { "notify" }
+try { & $TargetBin config set update.channel $InstallChannel *> $null } catch {}
+try { & $TargetBin config set update.auto $InstallAuto *> $null } catch {}
+if ($RepoUrl -match "gitee\.com") {
+    try { & $TargetBin config set update.source gitee *> $null } catch {}
+}
+try { & $TargetBin update --schedule install --quiet *> $null } catch {}
+
 $InstallArgs = if ($HarnessArgs.Count -eq 0) { @("install", "--with-hooks") } else { @("install") + $HarnessArgs }
 $PrevEAP = $ErrorActionPreference
 $ErrorActionPreference = "Continue"

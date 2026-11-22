@@ -26,7 +26,7 @@ previewDetails: 预览与申请
 # KPI 指标
 totalUsers: 活跃记忆单元
 todayOrders: 图谱节点 / 证据原文
-salesAmount: 实时召回延迟 (ms)
+salesAmount: 召回延迟中位数 (ms)
 pageVisits: MCP 召回 / 有效命中
 vsLastWeek: 索引就绪率
 kpiSubAssertions: L2 索引就绪率

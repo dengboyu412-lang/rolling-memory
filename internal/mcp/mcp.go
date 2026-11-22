@@ -32,13 +32,11 @@ package mcp
 import (
 	"bufio"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -48,6 +46,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/rocareer/rolling-memory/internal/config"
+	"github.com/rocareer/rolling-memory/internal/harness"
 	"github.com/rocareer/rolling-memory/internal/hostid"
 	"github.com/rocareer/rolling-memory/internal/ids"
 	"github.com/rocareer/rolling-memory/internal/memory/facade"
@@ -756,12 +755,14 @@ func toolCall(requestID any, rawParams any, memory *facade.Memory, lazy *LazyMem
 		active = opened
 	}
 	presence := resolveMCPPresence(active, arguments, clientProcess)
+	recallStarted := time.Now()
 	structured, text, err := recallResponse(active, arguments, presence)
+	elapsedMS := time.Since(recallStarted).Milliseconds()
 	if err != nil {
 		return toolError(requestID, err, debugOut)
 	}
 	mode, _ := arguments["mode"].(string)
-	recordRecallFact(active, presence, mode, recallOutcome(structured), text)
+	recordRecallFact(active, presence, mode, recallOutcome(structured), text, elapsedMS)
 	isGoldenScope := active.Config != nil && strings.HasPrefix(active.Config.Scope, "mem:golden:")
 	resPayload := map[string]any{
 		"content": []any{map[string]any{"type": "text", "text": text}},
@@ -1004,69 +1005,24 @@ func resolveMCPPresence(active *facade.Memory, arguments map[string]any, clientP
 		return mergeExplicit(text.PresenceCoordinates{})
 	}
 	identity := hostid.Detect()
-	harness := ""
+	harnessID := ""
 	if identity.ID != hostid.Unknown && identity.ID != hostid.CLI {
-		harness = string(identity.ID)
+		harnessID = string(identity.ID)
 	}
 	if ws := strings.TrimSpace(os.Getenv("ROLLING_MEMORY_WORKSPACE")); ws != "" {
-		if merged := mergeExplicit(text.DetectHarnessPresence(ws, harness, "")); merged != nil {
+		if merged := mergeExplicit(text.DetectHarnessPresence(ws, harnessID, "")); merged != nil {
 			return merged
 		}
 	}
 	cwd, _ := os.Getwd()
-	coords := text.DetectHarnessPresence(cwd, harness, "")
-	// ZCode's sidecar may be spawned from $HOME. The host's own in-flight
-	// tool record names the session directory, but it is only meaningful when
-	// the current process really is ZCode: querying it from another host is
-	// how Codex/DSH calls were stamped harness:zcode.
-	if identity.ID == hostid.ZCode {
-		if inFlight := resolveZCodeInFlightToolDirectory(ids.UTCNow(), identity.SessionID); inFlight != "" {
-			if text.DetectGitWorkspaceName(inFlight) != "" {
-				coords = text.DetectHarnessPresence(inFlight, "zcode", "")
-			}
+	coords := text.DetectHarnessPresence(cwd, harnessID, "")
+	// A host whose sidecar is spawned from $HOME may expose the session
+	// directory through its own in-flight record. The adapter decides whether it
+	// has an answer, so a call from one host can never be stamped as another.
+	if inFlight := harness.InFlightWorkspace(string(identity.ID), identity.SessionID, ids.UTCNow()); inFlight != "" {
+		if text.DetectGitWorkspaceName(inFlight) != "" {
+			coords = text.DetectHarnessPresence(inFlight, harnessID, "")
 		}
 	}
 	return mergeExplicit(coords)
-}
-
-// resolveZCodeInFlightToolDirectory recovers the directory of the ZCode
-// session that is currently running (or just ran) a Rolling-Memory call. The
-// caller must already have established that the current process is ZCode; the
-// session id, when known, narrows the query to this window instead of any
-// other ZCode window on the machine.
-func resolveZCodeInFlightToolDirectory(nowSec int64, sessionID string) string {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return ""
-	}
-	zdbPath := filepath.Join(home, ".zcode", "cli", "db", "db.sqlite")
-	if _, sErr := os.Stat(zdbPath); sErr != nil {
-		return ""
-	}
-	db, oErr := sql.Open("sqlite", zdbPath+"?mode=ro&_pragma=busy_timeout(600)")
-	if oErr != nil {
-		return ""
-	}
-	defer db.Close()
-	runningCutoffMS := (nowSec - 180) * 1000
-	recentCutoffMS := (nowSec - 30) * 1000
-	query := `
-		SELECT coalesce(s.directory, '')
-		FROM tool_usage t
-		JOIN session s ON s.id = t.session_id
-		WHERE t.tool_name LIKE '%rolling-memory%'
-		  AND t.tool_name LIKE '%recall%'
-		  AND ((t.status = 'running' AND t.started_at >= ?) OR t.started_at >= ?)
-		  AND coalesce(s.directory, '') != ''`
-	args := []any{runningCutoffMS, recentCutoffMS}
-	if session := strings.TrimSpace(sessionID); session != "" {
-		query += ` AND s.id = ?`
-		args = append(args, session)
-	}
-	query += `
-		ORDER BY (t.status = 'running') DESC, t.started_at DESC
-		LIMIT 1`
-	var dir string
-	_ = db.QueryRow(query, args...).Scan(&dir)
-	return strings.TrimSpace(dir)
 }

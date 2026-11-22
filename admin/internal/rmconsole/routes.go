@@ -37,7 +37,7 @@ const (
 	// 模块本身经 registry.RegisterAdmin 静态挂载，不是插件）。
 	Name = "rolling-memory"
 	// Version 软件版本（随 VERSION 文件同步）。
-	Version = "0.0.11"
+	Version = "0.0.12"
 	// CoreVersion 记忆核心版本（Rolling Autonoetic Memory Engine · the memory engine）
 	CoreVersion = "1.0.1"
 	// CoreCodename 记忆核心引擎代号（the memory engine）
@@ -185,6 +185,7 @@ func mount(g *gin.RouterGroup) {
 	g.POST("/system/version", middleware.AdminAuth(), middleware.AdminPermission(), systemVersionHandler)
 	g.POST("/system/update/status", middleware.AdminAuth(), middleware.AdminPermission(), systemUpdateStatusHandler)
 	g.POST("/system/update/channel", middleware.AdminAuth(), middleware.AdminPermission(), systemUpdateChannelHandler)
+	g.POST("/system/update/auto", middleware.AdminAuth(), middleware.AdminPermission(), systemUpdateAutoHandler)
 	g.POST("/system/update/source", middleware.AdminAuth(), middleware.AdminPermission(), systemUpdateSourceHandler)
 	g.POST("/system/update/check", middleware.AdminAuth(), middleware.AdminPermission(), systemUpdateCheckHandler)
 	g.POST("/system/update/apply", middleware.AdminAuth(), middleware.AdminPermission(), systemUpdateApplyHandler)
@@ -480,7 +481,7 @@ func collectStatus(home, hostVer, hostAPIVer string) StatusResponse {
 	dbPath := resolveMemoryDBPath(home)
 	logPath := rollingMemoryLogPath(home)
 	events, lastMS := readHookEvents(logPath, 20)
-	if ledger := loadRecallLedgerStat(home, dbPath, UserScope, time.Now().AddDate(0, 0, -7).Unix()); ledger != nil {
+	if ledger := loadRecallLedgerStat(dbPath, UserScope, time.Now().AddDate(0, 0, -7).Unix()); ledger != nil {
 		if len(ledger.recentEvents) > 0 {
 			events = ledger.recentEvents
 		}
@@ -535,7 +536,7 @@ func collectStatus(home, hostVer, hostAPIVer string) StatusResponse {
 			for i, r := range tvRows {
 				batchRows[i] = map[string]any{"id": r["id"], "content": r["txt"]}
 			}
-			warmHydrateZCodePointersBatch(home, resp.DBPath, batchRows)
+			warmHydratePointersBatch(home, resp.DBPath, batchRows)
 			for i := range tvRows {
 				tvRows[i]["_hydrated_ref_text"] = batchRows[i]["_hydrated_ref_text"]
 			}

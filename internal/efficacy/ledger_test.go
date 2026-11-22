@@ -274,3 +274,79 @@ func TestLedgerVersionGuard(t *testing.T) {
 		}
 	}
 }
+
+func TestLedgerRecallTimingRecordedForAllHosts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ledger.sqlite")
+	ledger, err := efficacy.OpenLedger(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := observedEvent("timed-recall")
+	event.Action, event.OutputOutcome, event.Hook = "recall", "hits", "mcp_recall:full"
+	event.Harness = "opencode"
+	elapsed := int64(321)
+	event.ElapsedMS = &elapsed
+	if err := ledger.Append(event); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := ledger.RecallTiming("timed-recall"); !ok || got != 321 {
+		t.Fatalf("RecallTiming = %d, %v; want 321, true", got, ok)
+	}
+	entries, err := ledger.Events(0, 10)
+	if err != nil || len(entries) != 1 || entries[0].ElapsedMS == nil || *entries[0].ElapsedMS != 321 {
+		t.Fatalf("Events did not expose timing: %+v, %v", entries, err)
+	}
+
+	unknown := observedEvent("timed-error")
+	unknown.Action, unknown.OutputOutcome = "recall", "error"
+	unknown.Observation, unknown.TextSHA256, unknown.TextBytes = "unknown", "", nil
+	unknown.ElapsedMS = &elapsed
+	if err := ledger.Append(unknown); err == nil {
+		t.Fatal("unknown event accepted a timing measurement")
+	}
+	ledger.Close()
+}
+
+func TestLedgerAddsTimingTableToExistingVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ledger.sqlite")
+	connection, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := connection.Exec(`
+		CREATE TABLE efficacy_event (
+			seq INTEGER PRIMARY KEY AUTOINCREMENT,
+			event_id TEXT NOT NULL UNIQUE,
+			execution_id TEXT NOT NULL,
+			session TEXT NOT NULL,
+			scope TEXT NOT NULL,
+			harness TEXT NOT NULL,
+			hook TEXT NOT NULL,
+			output_outcome TEXT NOT NULL,
+			action TEXT NOT NULL,
+			target_event_id TEXT NOT NULL,
+			observed_at INTEGER NOT NULL,
+			observation TEXT NOT NULL,
+			text_sha256 TEXT NOT NULL,
+			text_bytes INTEGER
+		);
+		CREATE TABLE efficacy_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+		CREATE INDEX efficacy_event_scope_harness ON efficacy_event(scope, harness, seq);
+		CREATE INDEX efficacy_event_target ON efficacy_event(target_event_id, seq);
+		PRAGMA user_version = 1;
+	`); err != nil {
+		t.Fatal(err)
+	}
+	connection.Close()
+	ledger, err := efficacy.OpenLedger(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+	if _, ok := ledger.RecallTiming("missing"); ok {
+		t.Fatal("missing timing reported as present")
+	}
+	if entries, err := ledger.Events(0, 1); err != nil || len(entries) != 0 {
+		t.Fatalf("existing events readable: entries=%d err=%v", len(entries), err)
+	}
+}

@@ -8,11 +8,12 @@ import (
 	"strings"
 
 	"github.com/rocareer/rolling-memory/internal/updatecheck"
+	"github.com/rocareer/rolling-memory/internal/updatesource"
 )
 
-// runUpdateSchedule manages the optional user-level periodic update check.
-// It only refreshes the shared cache and optionally notifies; installing an
-// update remains an explicit `update` action.
+// runUpdateSchedule manages the optional user-level periodic update job. The
+// job runs `update --auto`, which follows the saved background policy: notify,
+// apply, or skip when automatic updates are off.
 func (a *application) runUpdateSchedule(action string) int {
 	action = strings.ToLower(strings.TrimSpace(action))
 	var (
@@ -25,6 +26,13 @@ func (a *application) runUpdateSchedule(action string) int {
 		channel := updatecheck.ResolveChannel(a.args.String("channel"))
 		if base == "" && channel != "dev" {
 			return a.fail(fmt.Errorf("release channel is disabled (ROLLING_MEMORY_RELEASE_BASE is off); scheduled checks would have nothing to query"))
+		}
+		// The official release bases are resolved from update.source at run
+		// time. Embedding one of them here would freeze the schedule on the
+		// source that happened to be selected when it was installed.
+		switch base {
+		case updatesource.ReleaseBase(updatesource.GitHub), updatesource.ReleaseBase(updatesource.Gitee):
+			base = ""
 		}
 		status, err = updatecheck.InstallSchedule("", base)
 	case "remove", "uninstall", "disable":

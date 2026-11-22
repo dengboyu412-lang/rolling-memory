@@ -697,8 +697,8 @@ func inspectEnvHealth(ctx context.Context, memory *facade.Memory, harnessFilter 
 			MCPWired:                     w["mcp"],
 			HooksWired:                   w["hooks"],
 			HooksSupported:               d.HooksKind != "",
-			SessionsScanSupported:        harnessSessionsScannable(d.ID),
-			TurnsScanSupported:           harnessTurnsScannable(d.ID),
+			SessionsScanSupported:        harness.SessionsScannable(d.ID),
+			TurnsScanSupported:           harness.TurnsScannable(d.ID),
 			SessionsCount:                sessionsCnt,
 			LocalTurnsCount:              localTurnsCnt,
 			SyncedTurnsCount:             syncedCnt,
@@ -1142,7 +1142,7 @@ func executeReconcileSyncWithScanLimit(ctx context.Context, memory *facade.Memor
 		var harnessIDs []string
 		if harnessFilter == "all" {
 			for _, h := range preStatus.Harnesses {
-				if harnessTurnsScannable(h.ID) {
+				if harness.TurnsScannable(h.ID) {
 					harnessIDs = append(harnessIDs, h.ID)
 				}
 			}
@@ -1441,30 +1441,6 @@ func resolveActiveHarness(items []HarnessEnvItem, claims []activeHarnessClaim) (
 	return claims[best].id, claims[best].source
 }
 
-// harnessSessionsScannable reports whether this build can discover the
-// harness's local conversation sessions (the count shown on the panel).
-func harnessSessionsScannable(harnessID string) bool {
-	switch harnessID {
-	case "zcode", "claude-code", "codex", "dsh", "codebuddy", "workbuddy", "opencode", "doubao":
-		return true
-	}
-	return false
-}
-
-// harnessTurnsScannable reports whether scanHarnessTurns can also read those
-// sessions' turn content. A harness whose transcript is compressed or uses an
-// unsupported event schema counts sessions but reports zero turns, and the panel
-// must label that as "not counted" rather than "no history". OpenCode exposes a
-// session inventory only: its message/part schema has no turn reader in this
-// build, so it stays out of the turn list and is surfaced as a scope note.
-func harnessTurnsScannable(harnessID string) bool {
-	switch harnessID {
-	case "zcode", "claude-code", "codex", "dsh", "codebuddy", "workbuddy", "doubao":
-		return true
-	}
-	return false
-}
-
 // countExcludedSubagentSources reports how many host-side subagent sources sit
 // outside automatic coverage. The public coverage contract states that subagent
 // conversations are not guaranteed, so this is a known collection-scope limit:
@@ -1503,7 +1479,7 @@ func countExcludedSubagentSources(ctx context.Context, home, harnessID string) (
 		}
 		return count, true
 	case "zcode":
-		path := filepath.Join(home, ".zcode", "cli", "db", "db.sqlite")
+		path := harness.SessionStorePath(home, "zcode")
 		if _, err := os.Stat(path); err != nil {
 			return 0, os.IsNotExist(err)
 		}
@@ -1577,7 +1553,7 @@ func scanHarnessTurnsWithCoverageBoundContext(ctx context.Context, home, harness
 		s, t, l, c := scanOpenCodeSessions(ctx, home)
 		return s, t, l, c, 0
 	}
-	if !harnessTurnsScannable(harnessID) {
+	if !harness.TurnsScannable(harnessID) {
 		seen := map[string]bool{}
 		for _, pattern := range harness.TranscriptGlobs(home, harnessID) {
 			matches, _ := filepath.Glob(pattern)
@@ -1673,10 +1649,7 @@ func scanHarnessTurnsWithCoverageBoundContext(ctx context.Context, home, harness
 // JSON schema, so turn extraction stays unsupported; the panel reports
 // sessions_scan_supported=true and turns_scan_supported=false.
 func scanOpenCodeSessions(ctx context.Context, home string) (int, []candidateEpisodicTurn, int64, bool) {
-	path := filepath.Join(home, ".local", "share", "opencode", "opencode.db")
-	if xdg := strings.TrimSpace(os.Getenv("XDG_DATA_HOME")); xdg != "" {
-		path = filepath.Join(xdg, "opencode", "opencode.db")
-	}
+	path := harness.SessionStorePath(home, "opencode")
 	if _, err := os.Stat(path); err != nil {
 		return 0, nil, 0, os.IsNotExist(err)
 	}

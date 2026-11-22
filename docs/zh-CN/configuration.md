@@ -82,10 +82,13 @@ rmem config set <section.key> <value>
 
 | 配置项 | 默认值 | 含义 |
 |---|---|---|
-| `update.channel` | `dev` | `dev` 跟踪 `main` 最新提交（默认）；`stable` 只接受正式发布标签；`beta` 同时接受预发布标签 |
+| `update.channel` | `stable` | `stable` 只接受正式发布标签（默认）；`beta` 同时接受预发布标签；`dev` 跟踪 `main` 最新提交，适合源码构建 |
 | `update.source` | `github` | `github` 使用 GitHub Releases 官方渠道；`gitee` 使用 Gitee 镜像，适合访问 GitHub 较慢的网络 |
+| `update.auto` | `notify` | `off` 不做后台检查；`notify` 每六小时检查并通知；`apply` 自动下载、校验并安装 |
 
-`dev` 只报告 `main@<commit>`，更新需要源码重建，不会自动替换二进制。可用 `rmem config set update.channel beta` 保存偏好，也可在控制台「版本与更新」弹窗切换，或用 `rmem update --check --channel dev` 单次覆盖。
+`dev` 只报告 `main@<commit>`，更新需要源码重建，不会自动替换二进制。可用 `rmem config set update.channel beta` 保存偏好，也可在控制台「版本与更新」弹窗切换，或用 `rmem update --check --channel dev` 单次覆盖。预编译安装由安装器写入 `stable`，源码安装写入 `dev`。
+
+`update.auto` 可用 `rmem config set update.auto apply` 保存，也可在控制台「版本与更新 → 后台更新」选择。预编译安装默认 `apply`，源码安装默认 `notify`。手动执行一次同样的策略：`rmem update --auto`。
 
 更新源可用 `rmem config set update.source gitee` 保存，也可在控制台「版本与更新」弹窗选择。显式的 `--release-base` URL 或 `ROLLING_MEMORY_RELEASE_BASE` 仍只对本次运行生效并优先。Gitee 镜像尚未附带某个版本的预编译包时，检查结果会标记为“仅源码更新”，不会给出必然失败的下载按钮。
 
@@ -105,6 +108,7 @@ rmem config set <section.key> <value>
 | `ROLLING_MEMORY_DELIVERY_WINDOW` | `recall.delivery_window` |
 | `ROLLING_MEMORY_UPDATE_CHANNEL` | `update.channel` |
 | `ROLLING_MEMORY_UPDATE_SOURCE` | `update.source` |
+| `ROLLING_MEMORY_UPDATE_AUTO` | `update.auto` |
 | `ROLLING_MEMORY_DAEMON_MEMORY_LIMIT` | `daemon.memory_limit` |
 | `ROLLING_MEMORY_SNAPSHOT_INTERVAL` | `daemon.snapshot_interval` |
 | `ROLLING_MEMORY_DAEMON_SOCKET` | 引擎 socket 路径 |

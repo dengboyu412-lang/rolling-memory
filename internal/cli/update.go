@@ -18,7 +18,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rocareer/rolling-memory/internal/config"
 	"github.com/rocareer/rolling-memory/internal/mcp"
+	"github.com/rocareer/rolling-memory/internal/updatechannel"
 	"github.com/rocareer/rolling-memory/internal/updatecheck"
 	"github.com/rocareer/rolling-memory/internal/updatesource"
 	"github.com/rocareer/rolling-memory/internal/version"
@@ -35,6 +37,7 @@ const webDistSHA256Marker = ".sha256"
 
 func (a *application) runUpdate() int {
 	checkOnly := a.args.Flag("check")
+	autoRun := a.args.Flag("auto")
 	force := a.args.Flag("force")
 	tagsOnly := a.args.Flag("tags_only")
 	quiet := a.args.Flag("quiet")
@@ -60,6 +63,25 @@ func (a *application) runUpdate() int {
 	}
 	channel := updatecheck.ResolveChannel(a.args.String("channel"))
 	base := resolveReleaseBase(flagBase)
+	autoMode := ""
+	if autoRun && !checkOnly && !tagsOnly {
+		if !updatecheck.AutoCheckEnabled() {
+			autoMode = updatechannel.AutoOff
+		} else {
+			autoMode = resolveAutoMode()
+		}
+		if autoMode == updatechannel.AutoOff {
+			result := map[string]any{
+				"ok": true, "action": "auto", "auto": autoMode, "updated": false,
+				"skipped": "automatic updates are off",
+			}
+			human := func() { a.printf("automatic updates are off\n") }
+			if quiet {
+				return 0
+			}
+			return emitOrFail(a, result, human)
+		}
+	}
 	if base == "" && channel != "dev" {
 		return a.fail(fmt.Errorf("release channel is disabled (ROLLING_MEMORY_RELEASE_BASE is off); unset it or pass --release-base <url> to update"))
 	}
@@ -85,6 +107,25 @@ func (a *application) runUpdate() int {
 		}
 		if checkErr != nil && checked.LatestTag == "" {
 			return a.fail(fmt.Errorf("check latest version from %s: %w", base, checkErr))
+		}
+	}
+
+	// A Gitee tag can exist before its release artifacts are attached. When
+	// the selected mirror has no installable manifest, try the official
+	// GitHub release for the same channel; a reachable fallback is better than
+	// telling the user to rebuild from source.
+	assetFallback := ""
+	if !tagsOnly && channel != "dev" && !checked.Installable && updatesource.IsGiteeBase(base) {
+		githubBase := updatesource.ReleaseBase(updatesource.GitHub)
+		if retry, retryErr := updatecheck.Check(context.Background(), updatecheck.Options{
+			ReleaseBase: githubBase,
+			Channel:     channel,
+			Timeout:     15 * time.Second,
+		}); retryErr == nil && retry.Installable {
+			base = githubBase
+			checked = retry
+			checkErr = nil
+			assetFallback = updatesource.GitHub
 		}
 	}
 
@@ -150,6 +191,7 @@ func (a *application) runUpdate() int {
 			"installed_commit":      checked.InstalledCommit,
 			"release_base":          base,
 			"update_source":         sourceFromBase(base),
+			"asset_fallback":        assetFallback,
 			"update_available":      anyUpdate,
 			"downgrade_available":   checked.DowngradeAvailable,
 			"assets_available":      checked.AssetsAvailable,
@@ -243,6 +285,92 @@ func (a *application) runUpdate() int {
 		return emitOrFail(a, result, human)
 	}
 
+	// Only one process may replace the installed artifacts at a time. The
+	// scheduled policy and a manual click can race; the loser exits before
+	// touching the console or the binary.
+	unlock, lockErr := acquireUpdateLock()
+	if lockErr != nil {
+		if autoMode != "" {
+			result := map[string]any{
+				"ok": true, "action": "auto", "auto": autoMode, "updated": false,
+				"skipped": lockErr.Error(),
+			}
+			if quiet {
+				return 0
+			}
+			return emitOrFail(a, result, func() { a.printf("skipped: %s\n", lockErr) })
+		}
+		return a.fail(lockErr)
+	}
+	defer unlock()
+
+	if autoMode != "" {
+		// A background run never fails just because the channel has no
+		// installable artifact: it records the state and leaves a notification
+		// (or the console entry) to the user.
+		if !checked.Installable || checked.DowngradeAvailable {
+			notified := checked.UpdateAvailable && !checked.DowngradeAvailable
+			if notified {
+				_ = updatecheck.NotifyDesktop(checked.State)
+			}
+			result := map[string]any{
+				"ok":                  true,
+				"action":              "auto",
+				"auto":                autoMode,
+				"updated":             false,
+				"update_available":    checked.UpdateAvailable,
+				"installable":         checked.Installable,
+				"downgrade_available": checked.DowngradeAvailable,
+				"notified":            notified,
+				"latest_tag":          remoteVersion,
+				"latest_commit_short": checked.LatestCommitShort,
+				"install_method":      checked.InstallMethod,
+			}
+			human := func() {
+				switch {
+				case checked.DowngradeAvailable:
+					a.printf("local version is newer than channel %s\n", remoteVersion)
+				case checked.UpdateAvailable && !checked.Installable:
+					a.printf("update available · version %s -> %s (no installable artifacts; source update required)\n", version.Version, latestLabel)
+				default:
+					a.printf("up to date · version %s\n", version.Version)
+				}
+			}
+			if quiet {
+				return 0
+			}
+			return emitOrFail(a, result, human)
+		}
+		if autoMode == updatechannel.AutoNotify {
+			notified := checked.UpdateAvailable && !checked.DowngradeAvailable
+			if notified {
+				_ = updatecheck.NotifyDesktop(checked.State)
+			}
+			result := map[string]any{
+				"ok":               true,
+				"action":           "auto",
+				"auto":             autoMode,
+				"updated":          false,
+				"update_available": checked.UpdateAvailable,
+				"installable":      checked.Installable,
+				"notified":         notified,
+				"latest_tag":       remoteVersion,
+			}
+			human := func() {
+				if notified {
+					a.printf("update available · version %s -> %s (notification sent)\n", version.Version, latestLabel)
+					return
+				}
+				a.printf("up to date · version %s\n", version.Version)
+			}
+			if quiet {
+				return 0
+			}
+			return emitOrFail(a, result, human)
+		}
+		// autoMode == apply falls through to the verified install below.
+	}
+
 	if channel == "dev" {
 		hint := sourceUpdateHint(checked.InstallMethod, remoteVersion, channel, base)
 		if hint == "" {
@@ -264,6 +392,7 @@ func (a *application) runUpdate() int {
 		if err := os.MkdirAll(filepath.Dir(targetBin), 0o755); err != nil {
 			return a.fail(fmt.Errorf("create binary directory: %w", err))
 		}
+		backupInstalledFile(targetBin, targetBin+".prev")
 		if err := downloadAssetWithExpectedSHA(assetBase, cliAsset, wantCLISHA, targetBin); err != nil {
 			return a.fail(fmt.Errorf("update %s: %w", cliAsset, err))
 		}
@@ -284,14 +413,14 @@ func (a *application) runUpdate() int {
 		}
 		wasRunning := consoleReady(layout.apiURL()) || webAssetsReady(layout.webURL()) ||
 			readPIDFile(layout.apiPID) != 0 || readPIDFile(layout.webPID) != 0
-		if wasRunning && !deferConsoleRestart {
-			_ = stopPIDFile(layout.apiPID)
-			_ = stopPIDFile(layout.webPID)
-		}
+		// Download and verify before stopping a healthy console. A failed
+		// download must leave the user with a working console, not a stopped
+		// one and a half-written asset directory.
 		if adminNeedsUpdate {
 			if err := os.MkdirAll(filepath.Dir(cBin), 0o755); err != nil {
 				return a.fail(err)
 			}
+			backupInstalledFile(cBin, cBin+".prev")
 			if err := downloadAssetWithExpectedSHA(assetBase, adminAsset, wantAdminSHA, cBin); err != nil {
 				return a.fail(fmt.Errorf("update %s: %w", adminAsset, err))
 			}
@@ -302,6 +431,10 @@ func (a *application) runUpdate() int {
 				return a.fail(fmt.Errorf("update web-dist.tar.gz: %w", err))
 			}
 			updatedComponents = append(updatedComponents, "web-dist.tar.gz")
+		}
+		if wasRunning && !deferConsoleRestart {
+			_ = stopPIDFile(layout.apiPID)
+			_ = stopPIDFile(layout.webPID)
 		}
 		if wasRunning {
 			if deferConsoleRestart {
@@ -333,6 +466,7 @@ func (a *application) runUpdate() int {
 		"previous_version":         version.Version,
 		"latest_tag":               remoteVersion,
 		"release_base":             base,
+		"asset_fallback":           assetFallback,
 		"binary":                   targetBin,
 		"cli_sha256":               wantCLISHA,
 		"install_method":           checked.InstallMethod,
@@ -370,6 +504,40 @@ func attachUpdateHint(result map[string]any) map[string]any {
 		result["update"] = hint
 	}
 	return result
+}
+
+// acquireUpdateLock serializes artifact replacement across a manual click and
+// the scheduled policy. A lock older than thirty minutes is treated as
+// abandoned (the previous process was killed mid-update).
+func acquireUpdateLock() (func(), error) {
+	path := filepath.Join(filepath.Dir(updatecheck.StatePath()), "update.lock")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, err
+	}
+	handle, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		if info, statErr := os.Stat(path); statErr == nil && time.Since(info.ModTime()) > 30*time.Minute {
+			_ = os.Remove(path)
+			handle, err = os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("another update is already running")
+		}
+	}
+	_, _ = fmt.Fprintf(handle, "%d\n", os.Getpid())
+	_ = handle.Close()
+	return func() { _ = os.Remove(path) }, nil
+}
+
+// resolveAutoMode reads the saved background policy. An unreadable or invalid
+// config falls back to the safe default (notify, never install silently).
+func resolveAutoMode() string {
+	if cfg, err := config.Load(config.LoadOptions{}); err == nil {
+		if mode, err := updatechannel.NormalizeAuto(cfg.Update.Auto); err == nil {
+			return mode
+		}
+	}
+	return updatechannel.AutoDefault
 }
 
 func sourceFromBase(base string) string {
@@ -696,6 +864,30 @@ func updatePlistVersionStrings(plistContent, newVersion string) string {
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// backupInstalledFile keeps one previous copy before a verified replacement so
+// the console restart path can roll back a backend that fails to start.
+func backupInstalledFile(source, backup string) {
+	if !regularFileExists(source) {
+		return
+	}
+	input, err := os.Open(source)
+	if err != nil {
+		return
+	}
+	defer input.Close()
+	_ = os.Remove(backup)
+	output, err := os.OpenFile(backup, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+	if err != nil {
+		return
+	}
+	if _, err := io.Copy(output, input); err != nil {
+		_ = output.Close()
+		_ = os.Remove(backup)
+		return
+	}
+	_ = output.Close()
 }
 
 func fileSHA256(path string) string {

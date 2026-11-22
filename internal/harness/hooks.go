@@ -240,7 +240,7 @@ func installHooks(harness Harness, options InstallOptions, report *Report) {
 		return
 	}
 	if plugin, ok := activeNativePlugin(harness, options); ok && plugin.HasHooks {
-		if zcodeHasGlobalHooks(harness, options) {
+		if configHasGlobalHooks(harness, options) {
 			if options.Dedupe {
 				start := len(report.Actions)
 				uninstallHooks(harness, options, report)
@@ -501,9 +501,9 @@ func checkHooks(harness Harness, options InstallOptions, report *Report) {
 		return
 	}
 	if plugin, ok := activeNativePlugin(harness, options); ok && plugin.HasHooks {
-		if zcodeHasGlobalHooks(harness, options) {
+		if configHasGlobalHooks(harness, options) {
 			report.Add(harness.ID, "hooks", path, StatusConflict,
-				"duplicate hooks: both config.json and plugin "+plugin.ID+" active (run `rolling-memory install zcode --with-hooks` to deduplicate)")
+				"duplicate hooks: both config.json and plugin "+plugin.ID+" active (run `rolling-memory install "+harness.ID+" --with-hooks` to deduplicate)")
 			return
 		}
 		report.Add(harness.ID, "hooks", path, StatusOK, "1 event · plugin "+plugin.ID)

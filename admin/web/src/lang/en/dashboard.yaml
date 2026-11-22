@@ -26,7 +26,7 @@ previewDetails: Preview & apply
 # KPI cards
 totalUsers: Active Memory Units
 todayOrders: Graph Nodes / Traces
-salesAmount: Recall Latency (ms)
+salesAmount: Recall Latency Median (ms)
 pageVisits: MCP Recalls / Hits
 vsLastWeek: Index Readiness
 kpiSubAssertions: L2 Index Readiness

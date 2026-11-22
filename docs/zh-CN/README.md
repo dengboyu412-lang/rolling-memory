@@ -20,7 +20,7 @@
 | **[usb-portable.md](usb-portable.md)** | U 盘便携模式指南：现实适用前提（跨电脑开发同一项目）、`rmem init --portable` 一键制盘、挂载点漂移自愈锚点与 `rmem eject` 安全拔盘 | [docs/usb-portable.md](../usb-portable.md) |
 | **[plugin-console.md](plugin-console.md)** | Web 管理控制台指南：本地管理面板、WebSocket 实时流、粗略 ROI 趋势估算模块、体验评价 Hook 开关、记忆图谱与评测实验室 | [docs/plugin-console.md](../plugin-console.md) |
 | **[console-terminal.md](console-terminal.md)** | Web 控制台内置命令行（终端）使用指南：入口与界面构成、recall/Hook 实时流与水合正文回显、快捷命令与常用命令对照表（status / doctor / recent / check / `sync prune` 只读预演）、白名单执行与显式确认边界 | [docs/console-terminal.md](../console-terminal.md) |
-| **[install-upgrade.md](install-upgrade.md)** | 安装与升级指南：早期阶段默认 `dev`、stable/beta/dev 三通道、CLI / 控制台 / 定时任务 / 安装脚本升级路径，以及破坏性变更、兼容性、备份与回滚 | [docs/install-upgrade.md](../install-upgrade.md) |
+| **[install-upgrade.md](install-upgrade.md)** | 安装与升级指南：发布版默认 `stable`、源码安装默认 `dev`、stable/beta/dev 三通道、`update.auto` 后台策略、CLI / 控制台 / 定时任务 / 安装脚本升级路径，以及破坏性变更、兼容性、备份与回滚 | [docs/install-upgrade.md](../install-upgrade.md) |
 | **[configuration.md](configuration.md)** | 配置参考：配置文件位置与优先级、常用 `[core]` / `[recall]` / `[daemon]` 配置（含引擎内存上限 `auto` / `off` / 明确尺寸）、常用环境变量，以及控制台「系统管理 → 记忆服务」的等价操作 | [docs/configuration.md](../configuration.md) |
 | **[benchmarks.md](benchmarks.md)** | 基准复现与独立核验指南：自备语料与 `SHA-256` pin、LoCoMo 与剑桥大学 ATM-Bench 本地复现命令、评测协议校验与原始 JSONL 复算 | [docs/benchmarks.md](../benchmarks.md) |
 | **[architecture-and-performance.md](architecture-and-performance.md)** | 架构与性能：三层记忆、不可变的已发布代、异步可见性，以及不同入库积压下实测的本地召回时延 | [docs/architecture-and-performance.md](../architecture-and-performance.md) |

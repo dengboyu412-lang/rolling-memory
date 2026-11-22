@@ -40,6 +40,17 @@ func docRepeats(tf int32) float64 {
 	return 1
 }
 
+// bgMatch carries the already-computed query-side mass for a background term.
+// The anchor gate skips its posting scan (no candidate generation) and replays
+// the same match formula over the anchor candidates in a second phase.
+type bgMatch struct {
+	group    uint64
+	weight   float64
+	qTerm    Term
+	detached bool
+	alt      []uint64
+}
+
 func (e *Engine) searchClustersWithPositions(qTerms map[uint64]Term, qPositions map[uint64][]TermPosition, topK int) []Hit {
 	idx := e.Index
 	st := e.ensureClusterState()
@@ -51,6 +62,18 @@ func (e *Engine) searchClustersWithPositions(qTerms map[uint64]Term, qPositions 
 	}
 	sortUint64Asc(queryHashes)
 	sc.queryHashes = queryHashes
+	gateOn := e.AnchorGate
+	if gateOn {
+		anchors := 0
+		for _, h := range queryHashes {
+			if m, ok := idx.TermMass(h); ok && m > anchorGateMassNats {
+				anchors++
+			}
+		}
+		if anchors == 0 {
+			gateOn = false
+		}
+	}
 
 	const (
 		rmBitUpper          uint8 = 1 << 0
@@ -624,6 +647,7 @@ func (e *Engine) searchClustersWithPositions(qTerms map[uint64]Term, qPositions 
 	} else {
 		clear(groups)
 	}
+	var bgInfo map[uint64]bgMatch
 	candidates := sc.candidates[:idx.N]
 	unitStructGate := sc.unitStructGate[:idx.N]
 	dGen := sc.resetDirtyUnits(idx.N)
@@ -704,6 +728,7 @@ func (e *Engine) searchClustersWithPositions(qTerms map[uint64]Term, qPositions 
 		qTerm := qTerms[h]
 		isInferredOrdDay := qTerm.Role == RoleClosedBeacon && qTerm.Flags&rmFlagCompanion == 0 && qTerm.ExtFlags == ExtFlagSeenMorphOrClos
 		baseline, ok := idx.TermMass(h)
+		origMass := baseline
 		if !ok || baseline <= 0 {
 			if !isInferredOrdDay {
 				continue
@@ -872,6 +897,13 @@ func (e *Engine) searchClustersWithPositions(qTerms map[uint64]Term, qPositions 
 		if weight > groups[group] {
 			groups[group] = weight
 		}
+		if gateOn && !isInferredOrdDay && ok && origMass > 0 && origMass <= anchorGateMassNats {
+			if bgInfo == nil {
+				bgInfo = make(map[uint64]bgMatch, 16)
+			}
+			bgInfo[h] = bgMatch{group: group, weight: weight, qTerm: qTerm, detached: detachedFrag[group], alt: extraGroups[h]}
+			continue
+		}
 		ordDay := noDay
 		hasSameDayAnchor := false
 		if isInferredOrdDay {
@@ -956,6 +988,61 @@ func (e *Engine) searchClustersWithPositions(qTerms map[uint64]Term, qPositions 
 			c.upsertMatch(sc, group, matchedMass, p.entry, docEntry.bits, unitEntries, true)
 			for _, altG := range extraGroups[h] {
 				c.upsertMatch(sc, altG, matchedMass*transmissionPerHop, p.entry, docEntry.bits, unitEntries, false)
+			}
+		}
+	}
+
+	if gateOn && len(bgInfo) > 0 {
+		bgHashes := make([]uint64, 0, len(bgInfo))
+		for h := range bgInfo {
+			bgHashes = append(bgHashes, h)
+		}
+		sortUint64Asc(bgHashes)
+		for _, u := range sc.lexUnits {
+			entries := st.docEntriesOf(u)
+			if len(entries) == 0 {
+				continue
+			}
+			byHash := make(map[uint64]int32, len(entries))
+			for ei := range entries {
+				byHash[entries[ei].id] = int32(ei)
+			}
+			for _, h := range bgHashes {
+				ei, ok := byHash[h]
+				if !ok {
+					continue
+				}
+				info := bgInfo[h]
+				entry := entries[ei]
+				repeats := docRepeats(entry.tf)
+				if info.detached {
+					repeats *= transmissionPerHop
+				}
+				matchedMass := info.weight * (1.0 + repeats)
+				if info.qTerm.Flags&rmFlagCompanion != 0 && entry.flags&rmFlagCompanion != 0 && info.qTerm.Group != 0 && entry.group != 0 && entry.group != info.qTerm.Group {
+					if origA, okA := qTerms[info.qTerm.Group]; okA && info.qTerm.IsSlot2Companion(origA) {
+						if st.isPrimaryOf(h) {
+							matchedMass *= transmissionPerHop
+						} else if !info.detached {
+							matchedMass *= transmissionPerHop * transmissionPerHop
+						}
+					}
+				}
+				if meanBits > 0 && entry.bits > 0 {
+					matchedMass *= bitsGainSqrt(float64(entry.bits) / meanBits)
+				}
+				docGainMask := uint8(1<<2 | 1<<5 | 1<<7)
+				if info.qTerm.Flags&rmBitBoundaryQuote != 0 {
+					docGainMask |= rmBitBoundaryQuote
+				}
+				if e.FlagsGain > 0 && entry.flags&docGainMask != 0 {
+					matchedMass *= 1.0 + e.FlagsGain/eulerNumber
+				}
+				c := &candidates[u]
+				c.upsertMatch(sc, info.group, matchedMass, ei, entry.bits, entries, true)
+				for _, altG := range info.alt {
+					c.upsertMatch(sc, altG, matchedMass*transmissionPerHop, ei, entry.bits, entries, false)
+				}
 			}
 		}
 	}

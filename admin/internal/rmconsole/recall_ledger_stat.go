@@ -16,8 +16,8 @@ import (
 // 召回触发读数的真源：侧车事实账本（<memory.db>.efficacy.sqlite）。
 //
 // 为什么不再仅读钩子日志：rolling-memory.log 只覆盖 UserPromptSubmit 钩子路径，
-// 宿主未装钩子、或像 ZCode 这样直接走 MCP recall 工具时该腿恒为空；MCP 调用只落在
-// 账本里（MCP 服务端直写 + 宿主工具流水回填）。趋势图历史上用
+// 宿主未装钩子、或直接走 MCP recall 工具时该腿恒为空；MCP 调用只落在账本里
+// （MCP 服务端直写，含耗时与 outcome；宿主 transcript 回填只补历史 outcome）。趋势图历史上用
 // max(钩子日志, L3 结晶) 兜底，钩子安静时召回曲线会逐槽等于 L3 柱——把「检索召回」
 // 画成了「结晶写入」，属失实统计，此处改为直接读账本的真实召回行，并同步供给
 // KPI 触发计数、延迟分布与实时监控流。
@@ -110,7 +110,7 @@ const legacyRenamedScope = "rm" + ":" + "self"
 
 // loadRecallLedgerStat 单次扫描账本聚合召回行；账本缺失（老装机或单测未启用事实账本）或
 // 查询失败时返回空统计，调用方回退钩子日志，读数不伪造。
-func loadRecallLedgerStat(home, dbPath, scope string, sinceUnix int64) *recallLedgerStat {
+func loadRecallLedgerStat(dbPath, scope string, sinceUnix int64) *recallLedgerStat {
 	stat := &recallLedgerStat{
 		slot: map[int64]recallSourceCounts{},
 		hour: map[string]recallSourceCounts{},
@@ -214,46 +214,32 @@ func loadRecallLedgerStat(home, dbPath, scope string, sinceUnix int64) *recallLe
 		}
 	}
 
-	// 提取最近 12 条 MCP 召回事件供实时监控流展示，并若为默认生产库则补充 ZCode 真实耗时（ms）。
-	// 原始行窗口取 60（约为样本上限的 3 倍）：失败/超时（status=error）的墙钟不代表检索耗时，
-	// 只进秒级耗时映射供监控流按事件标注真实耗时，不进滑动均值与「最近一次」；
-	// 放宽窗口保证剔除失败行后仍能凑满近 20 次成功样本。
+	// 提取最近 12 条 MCP 召回事件供实时监控流展示；耗时统一取 MCP 服务端自记的
+	// efficacy_recall_timing，对全部宿主同一口径，不读取任何单一宿主的工具流水库。
+	// 失败行（error）不进入延迟样本；旧世代账本没有计时表时按「无样本」处理，不伪造读数。
 	latBySec := map[int64]int{}
-	defaultVault := filepath.Join(home, ".local", "share", "rolling-memory", "memory.db")
-	if strings.TrimSpace(home) != "" && filepath.Clean(dbPath) == filepath.Clean(defaultVault) {
-		zdbPath := filepath.Join(home, ".zcode", "cli", "db", "db.sqlite")
-		if zdb, zErr := memoryRODB(zdbPath); zErr == nil && zdb != nil {
-			sinceMS := time.Now().Add(-7 * 24 * time.Hour).UnixMilli()
-			zRows, zErr := zdb.Query(`
-					SELECT coalesce(started_at, 0), coalesce(completed_at, 0), coalesce(output_bytes, 0), status
-					FROM tool_usage
-					WHERE started_at >= ?
-					  AND tool_name IN ('mcp__plugin_rolling-memory_rolling-memory__recall', 'mcp__rolling-memory__recall', 'rolling-memory:rolling-memory__recall')
-					  AND completed_at > started_at
-					ORDER BY started_at DESC
-					LIMIT 60
-				`, sinceMS)
-			if zErr == nil {
-				var revLat []int
-				for zRows.Next() {
-					var stMS, edMS, outB int64
-					var st string
-					if zRows.Scan(&stMS, &edMS, &outB, &st) == nil {
-						dur := int(edMS - stMS)
-						if dur >= 1 && dur <= 60000 {
-							latBySec[edMS/1000] = dur
-							latBySec[stMS/1000] = dur
-							if st == "completed" && len(revLat) < 20 {
-								revLat = append(revLat, dur)
-							}
-						}
-					}
-				}
-				zRows.Close()
-				for i := len(revLat) - 1; i >= 0; i-- {
-					stat.latencies = append(stat.latencies, revLat[i])
-				}
+	latQuery := fmt.Sprintf(`SELECT e.observed_at, t.elapsed_ms
+		FROM efficacy_event e
+		JOIN efficacy_recall_timing t ON t.event_id = e.event_id
+		WHERE e.scope IN (%s)
+		  AND e.action = 'recall' AND e.hook LIKE 'mcp_recall:%%'
+		  AND e.hook != 'mcp_recall:tool'
+		  AND e.output_outcome IN ('hits', 'empty')
+		ORDER BY e.observed_at DESC
+		LIMIT 20;`, placeholders)
+	if latRows, lErr := sqliteQueryJSONArgs(ledgerPath, latQuery, scopeArgs...); lErr == nil {
+		rev := make([]int, 0, len(latRows))
+		for _, r := range latRows {
+			ms := asInt(r["elapsed_ms"])
+			if ms < 0 {
+				continue
 			}
+			tsSec := int64(asInt(r["observed_at"])) / int64(time.Second)
+			latBySec[tsSec] = ms
+			rev = append(rev, ms)
+		}
+		for i := len(rev) - 1; i >= 0; i-- {
+			stat.latencies = append(stat.latencies, rev[i])
 		}
 	}
 
@@ -276,9 +262,6 @@ func loadRecallLedgerStat(home, dbPath, scope string, sinceUnix int64) *recallLe
 			ms := latBySec[ts]
 			if ms == 0 {
 				ms = latBySec[ts-1]
-			}
-			if ms == 0 && len(stat.latencies) > 0 {
-				ms = stat.latencies[len(stat.latencies)-1]
 			}
 			item := HookEventItem{
 				Timestamp: ts,

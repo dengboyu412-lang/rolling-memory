@@ -58,6 +58,11 @@ const shellScatterFloor = 0.1353352832366127
 // stays inside [0,1] even if the calibrated kernel or the penalty range changes.
 const cloneDampingKernel = 0.1353352832366127
 
+// anchorGateMassNats 是锚点门的质量边界：ln((N+1)/(df+1)) <= 2 的词项
+// 视为背景（与 HighDFFraction=e^-2 同一标定）。有更强锚点时，背景词不生成
+// 候选，只在锚点候选集内做第二阶段复核；没有锚点时完全走兼容路径。
+const anchorGateMassNats = 2.0
+
 // 透射率与亲和地板三件套的包级唯一声明；此前评分、关系与筛选各函数内的
 // 同名局部副本已删除，引用处直接解析到本声明。三种历史写法（局部
 // 1.0/(E·E)、局部 transmissionPerHop*transmissionPerHop、运行时 1.0-transmissionPerHop 与 1.0-transmissionPerHop*transmissionPerHop）与本声明
@@ -113,6 +118,11 @@ type Engine struct {
 	// 每个命中查询原子的质量按 bitsGainSqrt(声明宽度/语料均宽) 缩放；无声明
 	// 宽度时回退语料折叠宽度，仍无宽度则质量原值。
 	BitsMass bool
+	// AnchorGate 开启查询锚点门：当查询中存在更强锚点时，背景词
+	// （质量 <= anchorGateMassNats，约 df >= N/e²）不再生成候选，但仍参与
+	// 组质量与锚点候选的第二阶段复核；没有锚点的查询完全走兼容路径。
+	// 只作用于簇流水线；非簇回退路径保持不变。默认关闭。
+	AnchorGate bool
 	// TimeKernel 开启扩散透射的时空核。
 	TimeKernel bool
 	// ClusterPipeline 默认开启四步簇与短语流水线（EntityCluster × SpacetimeCluster × PhraseDyad）。
@@ -478,6 +488,7 @@ func (e *Engine) OverlayDelta(deltaDocs []Doc, maskedUnitIDs []string) *Engine {
 		Contraction:        e.Contraction,
 		FlagsGain:          e.FlagsGain,
 		BitsMass:           e.BitsMass,
+		AnchorGate:         e.AnchorGate,
 		TimeKernel:         e.TimeKernel,
 		ClusterPipeline:    e.ClusterPipeline,
 		EnableStage3Plugin: e.EnableStage3Plugin,

@@ -271,12 +271,12 @@ func TestRecallLedgerMergesRenamedHistoricalScope(t *testing.T) {
 	insert("current", UserScope, nowSec-600)
 	_ = ldb.Close()
 
-	stat := loadRecallLedgerStat(home, dbPath, UserScope, nowSec-30*86400)
+	stat := loadRecallLedgerStat(dbPath, UserScope, nowSec-30*86400)
 	if stat.totalMCPRecalls != 3 || stat.hitMCPRecalls != 3 {
 		t.Fatalf("default view must merge renamed historical scope: total=%d hits=%d, want 3/3",
 			stat.totalMCPRecalls, stat.hitMCPRecalls)
 	}
-	onlyRenamed := loadRecallLedgerStat(home, dbPath, legacyRenamedScope, nowSec-30*86400)
+	onlyRenamed := loadRecallLedgerStat(dbPath, legacyRenamedScope, nowSec-30*86400)
 	if onlyRenamed.totalMCPRecalls != 1 {
 		t.Fatalf("explicit renamed-scope view = %d, want 1（不做反向扩张）", onlyRenamed.totalMCPRecalls)
 	}
@@ -298,7 +298,7 @@ func TestRecallLedgerLatencyExcludesFailedCalls(t *testing.T) {
 	}
 	_ = db.Close()
 
-	// 账本只需存在即可：延迟腿读宿主工具流水，不依赖账本行。
+	// 延迟样本来自 MCP 服务端自记的账本计时，与任何宿主工具流水库无关。
 	ldb, err := openPlainSQLite(dbPath + ".efficacy.sqlite")
 	if err != nil {
 		t.Fatalf("open ledger db: %v", err)
@@ -318,40 +318,53 @@ func TestRecallLedgerLatencyExcludesFailedCalls(t *testing.T) {
 		observation TEXT NOT NULL,
 		text_sha256 TEXT NOT NULL,
 		text_bytes INTEGER
+	);
+	CREATE TABLE efficacy_recall_timing (
+		event_id TEXT PRIMARY KEY,
+		elapsed_ms INTEGER NOT NULL,
+		recorded_at INTEGER NOT NULL
 	);`); err != nil {
 		_ = ldb.Close()
-		t.Fatalf("create efficacy_event: %v", err)
+		t.Fatalf("create ledger tables: %v", err)
 	}
+	now := time.Now()
+	insertRecall := func(id, harness, outcome string, ago time.Duration, elapsedMS int64) {
+		at := now.Add(-ago).UnixNano()
+		if _, iErr := ldb.Exec(`INSERT INTO efficacy_event(
+			event_id, execution_id, session, scope, harness, hook, output_outcome,
+			action, target_event_id, observed_at, observation, text_sha256, text_bytes
+		) VALUES (?, ?, '', ?, ?, 'mcp_recall:full', ?, 'recall', '', ?, 'observed', 'hash', 1)`,
+			id, id, UserScope, harness, outcome, at); iErr != nil {
+			t.Fatalf("insert event: %v", iErr)
+		}
+		if _, iErr := ldb.Exec(`INSERT INTO efficacy_recall_timing(event_id, elapsed_ms, recorded_at) VALUES (?, ?, ?)`,
+			id, elapsedMS, at); iErr != nil {
+			t.Fatalf("insert timing: %v", iErr)
+		}
+	}
+	insertRecall("ok-old", "opencode", "hits", 40*time.Second, 100)
+	insertRecall("failed-timeout", "opencode", "error", 30*time.Second, 30000)
+	insertRecall("failed-fast", "zcode", "error", 20*time.Second, 9)
+	insertRecall("ok-new", "claude-code", "empty", 10*time.Second, 200)
 	_ = ldb.Close()
 
+	// A host tool_usage store with conflicting values must not affect the card.
 	zdb, err := openPlainSQLite(filepath.Join(home, ".zcode", "cli", "db", "db.sqlite"))
 	if err != nil {
 		t.Fatalf("open zcode db: %v", err)
 	}
 	if _, err := zdb.Exec(`CREATE TABLE tool_usage (
 		tool_name TEXT, started_at INTEGER, completed_at INTEGER, output_bytes INTEGER, status TEXT
-	)`); err != nil {
+	);
+	INSERT INTO tool_usage VALUES ('mcp__rolling-memory__recall', 1, 999999, 0, 'completed');`); err != nil {
 		_ = zdb.Close()
-		t.Fatalf("create tool_usage: %v", err)
+		t.Fatalf("seed tool_usage: %v", err)
 	}
-	nowMS := time.Now().UnixMilli()
-	insertUsage := func(startedAgoMS, durMS int64, status string) {
-		_, iErr := zdb.Exec(`INSERT INTO tool_usage(tool_name, started_at, completed_at, output_bytes, status)
-			VALUES ('mcp__rolling-memory__recall', ?, ?, 0, ?)`,
-			nowMS-startedAgoMS, nowMS-startedAgoMS+durMS, status)
-		if iErr != nil {
-			t.Fatalf("insert usage: %v", iErr)
-		}
-	}
-	insertUsage(40000, 100, "completed")
-	insertUsage(30000, 30000, "error") // 30s 超时
-	insertUsage(20000, 9, "error")     // 瞬时失败
-	insertUsage(10000, 200, "completed")
 	_ = zdb.Close()
 
-	stat := loadRecallLedgerStat(home, dbPath, UserScope, time.Now().Unix()-3600)
+	stat := loadRecallLedgerStat(dbPath, UserScope, time.Now().Unix()-3600)
 	if len(stat.latencies) != 2 || stat.latencies[0] != 100 || stat.latencies[1] != 200 {
-		t.Fatalf("latencies = %v, want [100 200]（失败/超时行不得进入滑动均值）", stat.latencies)
+		t.Fatalf("latencies = %v, want [100 200]（失败行与宿主工具流水都不得进入样本）", stat.latencies)
 	}
 }
 

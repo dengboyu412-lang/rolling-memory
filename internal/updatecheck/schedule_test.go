@@ -44,8 +44,8 @@ func TestInstallRemoveScheduleDryRun(t *testing.T) {
 		t.Fatalf("scheduler file: %v", err)
 	}
 	text := string(raw)
-	if !strings.Contains(text, binary) || !strings.Contains(text, "--notify") || !strings.Contains(text, mirror) {
-		t.Fatalf("scheduler file does not reference the binary/notification/mirror:\n%s", text)
+	if !strings.Contains(text, binary) || !strings.Contains(text, "--auto") || !strings.Contains(text, mirror) {
+		t.Fatalf("scheduler file does not reference the binary/auto policy/mirror:\n%s", text)
 	}
 
 	current, err := ScheduleStatusInfo()

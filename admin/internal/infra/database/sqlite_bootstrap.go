@@ -440,7 +440,8 @@ func bootstrapSQLite(db *gorm.DB) error {
 			(357, 128, 'node', '读取 ATM-Bench 官方协议对拍状态', 'plugin/rolling-memory/eval/atm/protocol', '', '', '', '', '', 1, '', '', 0, 1, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
 			(358, 101, 'node', '预演或执行记忆清理与自愈', 'plugin/rolling-memory/maintenance/prune', '', '', '', '', '', 1, '', '', 0, 1, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
 			(359, 101, 'node', '扫描或执行磁盘空间维护', 'plugin/rolling-memory/maintenance/space', '', '', '', '', '', 1, '', '', 0, 1, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
-			(360, 101, 'node', '切换在线更新源', 'plugin/rolling-memory/system/update/source', '', '', '', '', '', 1, '', '', 0, 1, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`).Error
+			(360, 101, 'node', '切换在线更新源', 'plugin/rolling-memory/system/update/source', '', '', '', '', '', 1, '', '', 0, 1, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+			(361, 101, 'node', '设置后台更新策略（关闭 / 通知 / 自动安装）', 'plugin/rolling-memory/system/update/auto', '', '', '', '', '', 1, '', '', 0, 1, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`).Error
 	_ = db.Exec(`UPDATE "admin_rules" SET "weigh" = 970 WHERE "name" = 'auth' AND "type" = 'dir' AND "weigh" = 998`).Error
 	_ = db.Exec(`UPDATE "admin_rules" SET "weigh" = 969 WHERE "name" = 'routine' AND "type" = 'dir' AND "weigh" = 997`).Error
 	// 「常规管理」频道改名为「系统管理」：只迁移仍是出厂标题的行，用户自定义标题保持不动。
@@ -845,9 +846,22 @@ func bootstrapRollingMemoryEvalTables(db *gorm.DB) error {
 		}
 	}
 	// cloud_hits 是云端面停用前的逐题命中投影，本地明文台账以 local_hits 为准；每行 payload
-	// 是完整 JSON 真源 ⇒ 回收该列不丢读数。旧 SQLite 不支持 DROP COLUMN 时不阻断启动。
-	_ = db.Exec(`ALTER TABLE "plugin_rolling_memory_eval_task_item" DROP COLUMN "cloud_hits"`).Error
+	// 是完整 JSON 真源 ⇒ 回收该列不丢读数。旧 SQLite 不支持 DROP COLUMN 时不阻断启动；
+	// 列已不存在时也跳过 DDL，避免每次启动都让驱动记一条 "no such column"。
+	if tableHasColumn(db, "plugin_rolling_memory_eval_task_item", "cloud_hits") {
+		_ = db.Exec(`ALTER TABLE "plugin_rolling_memory_eval_task_item" DROP COLUMN "cloud_hits"`).Error
+	}
 	return nil
+}
+
+// tableHasColumn probes one column through pragma_table_info. Table names are
+// compile-time constants in this package; column names come from the local DDL.
+func tableHasColumn(db *gorm.DB, table, column string) bool {
+	var count int64
+	if err := db.Raw(fmt.Sprintf(`SELECT COUNT(*) FROM pragma_table_info('%s') WHERE name = ?`, table), column).Scan(&count).Error; err != nil {
+		return false
+	}
+	return count > 0
 }
 
 var (

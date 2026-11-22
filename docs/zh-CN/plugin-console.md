@@ -22,7 +22,7 @@ Rolling Memory 随仓提供基于纯 Go SQLite 的完整 Web 管理控制台（`
 >    CGO_ENABLED=0 go build -trimpath -o rolling-memory ./cmd/rolling-memory
 >    ./rolling-memory panel
 >    ```
->    `rolling-memory panel` 会自动检测仓库中的 `admin/cmd` 源码并编译后端二进制，启动后端 API（`127.0.0.1:9006`）与前端静态服务（`127.0.0.1:8008`），随后打开 `http://localhost:8008/#/admin`（登录页上写明了本机默认演示账号 `rolling / rolling`）。可通过 `rolling-memory panel status` 查看状态、`rolling-memory panel stop` 停止进程，或使用 `--api-port` / `--web-port`（环境变量 `RM_PANEL_API_PORT` / `RM_PANEL_WEB_PORT`）自定义端口。
+>    `rolling-memory panel` 会自动检测仓库中的 `admin/cmd` 源码并编译后端二进制，启动后端 API（`127.0.0.1:9006`）与前端静态服务（`127.0.0.1:8008`），随后打开 `http://localhost:8008/#/admin`（登录页上写明了本机默认演示账号 `rolling / rolling`）。可通过 `rolling-memory panel status` 查看状态、`rolling-memory panel stop` 停止进程、`rolling-memory panel restart` 从已安装的后端与前端资源重启，或使用 `--api-port` / `--web-port`（环境变量 `RM_PANEL_API_PORT` / `RM_PANEL_WEB_PORT`）自定义端口。
 > 3. **手动分别编译并启动前后端**（适合二次开发与调试）：
 >    ```bash
 >    # 终端 1 —— 编译并启动后端 API (127.0.0.1:9006)

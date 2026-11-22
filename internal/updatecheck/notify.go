@@ -15,7 +15,8 @@ import (
 )
 
 // NotifyDesktop sends one best-effort desktop notification per version. The
-// scheduled check calls it explicitly; nothing is installed automatically.
+// notify policy and the source-only fallback of the apply policy call it; an
+// apply run installs the verified update instead of notifying.
 func NotifyDesktop(state State) error {
 	if IsTestBinary() || !state.UpdateAvailable || state.DowngradeAvailable || state.NeedsSourceBaseline {
 		return nil

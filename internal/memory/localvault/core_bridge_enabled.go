@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rocareer/rolling-memory/internal/config"
 	core "github.com/rocareer/rolling-memory/internal/core"
 	"github.com/rocareer/rolling-memory/sdk/go/public/closedset"
 	"github.com/rocareer/rolling-memory/sdk/go/public/shaping"
@@ -279,6 +280,7 @@ func (v *Vault) buildCorpusEngine(ctx context.Context) *core.Engine {
 		return nil
 	}
 	eng := core.NewEngine(idx)
+	eng.AnchorGate = config.AnchorGateEnabled()
 	eng.MaterializeClusterState()
 	return eng
 }

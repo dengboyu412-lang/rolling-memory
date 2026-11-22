@@ -413,6 +413,21 @@ func ensureCanonicalBusinessSchema(db *sql.DB) error {
 	if _, err := db.Exec(canonicalBusinessDDL); err != nil {
 		return err
 	}
+	// A trial BEFORE INSERT trigger compensated the REPLACE rewrite leak, but it
+	// also fired for INSERT ... ON CONFLICT DO UPDATE, which resolves to an
+	// UPDATE and never fires the INSERT counter, so it could decrement on a
+	// rewrite that did not add a row. The adapter now adjusts docs_cnt for the
+	// rewrite it actually performs; drop the trial trigger from vaults that
+	// carry it.
+	var trialCounter int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'rm_cnt_docs_bi'`).Scan(&trialCounter); err != nil {
+		return err
+	}
+	if trialCounter != 0 {
+		if _, err := db.Exec(`DROP TRIGGER IF EXISTS rm_cnt_docs_bi`); err != nil {
+			return err
+		}
+	}
 	// Vaults created by an earlier build of the ingest queue lack the deferred
 	// retry column; the additive migration keeps them writable instead of
 	// failing every claim query. Fresh databases already carry the column.
@@ -428,19 +443,28 @@ func ensureCanonicalBusinessSchema(db *sql.DB) error {
 	if err := ensureIngestQueueIndexes(db); err != nil {
 		return err
 	}
-	// One-time backfill for vaults that predate the O(1) corpus counters. The
-	// marker keeps later opens from scanning the tables again.
-	var counted int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM rm_migration WHERE key = 'canonical_counts_v1'`).Scan(&counted); err != nil {
-		return err
-	}
-	if counted == 0 {
+	// One-time backfills for vaults that predate the O(1) corpus counters. The
+	// markers keep later opens from scanning the tables again. The v2 marker
+	// repairs the drift that REPLACE rewrites left before rm_cnt_docs_bi existed.
+	backfillCounts := func(marker string) error {
+		var counted int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM rm_migration WHERE key = ?`, marker).Scan(&counted); err != nil {
+			return err
+		}
+		if counted != 0 {
+			return nil
+		}
 		if _, err := db.Exec(`UPDATE rm_revision SET docs_cnt = (SELECT COUNT(*) FROM rm_docs), terms_cnt = (SELECT COUNT(*) FROM rm_terms) WHERE id = 1`); err != nil {
 			return err
 		}
-		if _, err := db.Exec(`INSERT OR REPLACE INTO rm_migration(key, value) VALUES ('canonical_counts_v1', '1')`); err != nil {
-			return err
-		}
+		_, err := db.Exec(`INSERT OR REPLACE INTO rm_migration(key, value) VALUES (?, '1')`, marker)
+		return err
+	}
+	if err := backfillCounts("canonical_counts_v1"); err != nil {
+		return err
+	}
+	if err := backfillCounts("canonical_counts_v2"); err != nil {
+		return err
 	}
 	return nil
 }
@@ -575,8 +599,21 @@ func writePreparedCanonical(tx *sql.Tx, store *core.Store, unitID string, prepar
 			return fmt.Errorf("%w: %s", ErrEpisodicUnitDeleted, unitID)
 		}
 	}
+	// INSERT OR REPLACE resolves a primary-key conflict by deleting the old row,
+	// and SQLite does not fire DELETE triggers for that implicit delete unless
+	// recursive triggers are enabled. Remember whether this unit already exists
+	// so docs_cnt stays equal to the live row count after the replacement.
+	var replacing int
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM rm_docs WHERE unit_id = ?)`, unitID).Scan(&replacing); err != nil {
+		return err
+	}
 	if err := store.IngestTx(tx, []core.Doc{prepared.doc}); err != nil {
 		return err
+	}
+	if replacing != 0 {
+		if _, err := tx.Exec(`UPDATE rm_revision SET docs_cnt = docs_cnt - 1 WHERE id = 1`); err != nil {
+			return err
+		}
 	}
 	_, err := tx.Exec(canonicalUnitMetaUpsertSQL, canonicalUnitMetaArgs(unitID, prepared.meta)...)
 	return err

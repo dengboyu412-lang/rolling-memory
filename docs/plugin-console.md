@@ -22,7 +22,7 @@ Rolling Memory ships with a full pure-Go SQLite Web Administration Console (`rol
 >    CGO_ENABLED=0 go build -trimpath -o rolling-memory ./cmd/rolling-memory
 >    ./rolling-memory panel
 >    ```
->    `rolling-memory panel` automatically compiles `admin/cmd` from your checkout, starts the backend API on `127.0.0.1:9006`, serves `admin/web/dist` on `127.0.0.1:8008`, and opens `http://localhost:8008/#/admin` (sign in with the local demo account shown on the login page, default `rolling / rolling`). Use `rolling-memory panel status` to inspect both processes, `rolling-memory panel stop` to stop them, and `--api-port` / `--web-port` (or `RM_PANEL_API_PORT` / `RM_PANEL_WEB_PORT`) to customize ports.
+>    `rolling-memory panel` automatically compiles `admin/cmd` from your checkout, starts the backend API on `127.0.0.1:9006`, serves `admin/web/dist` on `127.0.0.1:8008`, and opens `http://localhost:8008/#/admin` (sign in with the local demo account shown on the login page, default `rolling / rolling`). Use `rolling-memory panel status` to inspect both processes, `rolling-memory panel stop` to stop them, `rolling-memory panel restart` to reload them from the installed backend and web assets, and `--api-port` / `--web-port` (or `RM_PANEL_API_PORT` / `RM_PANEL_WEB_PORT`) to customize ports.
 > 3. **Or run backend and frontend manually** (for console development):
 >    ```bash
 >    # Terminal 1 — Backend API (127.0.0.1:9006)

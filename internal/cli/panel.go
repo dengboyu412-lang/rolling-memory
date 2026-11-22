@@ -138,10 +138,12 @@ func (a *application) runPanel() int {
 		return a.runPanelStart(layout)
 	case "stop":
 		return a.runPanelStop(layout)
+	case "restart":
+		return a.runPanelRestart(layout)
 	case "status":
 		return a.runPanelStatus(layout)
 	default:
-		return a.fail(fmt.Errorf("unknown panel action %q; use start, stop or status", verb))
+		return a.fail(fmt.Errorf("unknown panel action %q; use start, stop, restart or status", verb))
 	}
 }
 
@@ -368,11 +370,62 @@ func webAssetsHandler(dir string) http.Handler {
 	})
 }
 
-func (a *application) runPanelStop(layout panelLayout) int {
+// stopConsoleProcesses stops the recorded backend and frontend processes
+// without printing or emitting a result, so both `panel stop` and
+// `panel restart` share one verified shutdown path.
+func stopConsoleProcesses(layout panelLayout) (bool, bool) {
 	_ = resolvePanelPID(layout.apiPID, layout.apiPort, consoleReady(layout.apiURL()))
 	_ = resolvePanelPID(layout.webPID, layout.webPort, webAssetsReady(layout.webURL()))
-	stoppedAPI := stopPIDFile(layout.apiPID)
-	stoppedWeb := stopPIDFile(layout.webPID)
+	return stopPIDFile(layout.apiPID), stopPIDFile(layout.webPID)
+}
+
+// runPanelRestart stops both console processes and starts them again from the
+// already installed backend and web assets. It is the safe hand-off used by an
+// update that has replaced those assets: the caller can run it in a detached
+// process so stopping the backend does not kill the restart itself.
+func (a *application) runPanelRestart(layout panelLayout) int {
+	stoppedAPI, stoppedWeb := stopConsoleProcesses(layout)
+	if stoppedAPI || stoppedWeb {
+		// Let the old listeners release their ports before rebinding.
+		time.Sleep(300 * time.Millisecond)
+	}
+	if code := a.runPanelStart(layout); code == 0 {
+		return 0
+	}
+	// A verified update can still produce an unusable backend (wrong
+	// architecture, truncated download, incompatible schema). Restore the
+	// previous backend and frontend once instead of leaving the console down.
+	_, _ = stopConsoleProcesses(layout)
+	if !restoreConsolePrevious(layout) {
+		return 1
+	}
+	a.errorf("console failed to start; restored the previous backend and web assets\n")
+	return a.runPanelStart(layout)
+}
+
+// restoreConsolePrevious reinstates the one-generation backups written by the
+// updater. It reports whether anything was restored.
+func restoreConsolePrevious(layout panelLayout) bool {
+	restored := false
+	previousBin := layout.binPath + ".prev"
+	if regularFileExists(previousBin) {
+		_ = os.Remove(layout.binPath)
+		if err := os.Rename(previousBin, layout.binPath); err == nil {
+			restored = true
+		}
+	}
+	previousWeb := layout.webDist + ".prev"
+	if info, err := os.Stat(previousWeb); err == nil && info.IsDir() {
+		_ = os.RemoveAll(layout.webDist)
+		if err := os.Rename(previousWeb, layout.webDist); err == nil {
+			restored = true
+		}
+	}
+	return restored
+}
+
+func (a *application) runPanelStop(layout panelLayout) int {
+	stoppedAPI, stoppedWeb := stopConsoleProcesses(layout)
 	human := func() {
 		if stoppedAPI || stoppedWeb {
 			fmt.Printf("console stopped (backend=%t, web=%t)\n", stoppedAPI, stoppedWeb)
@@ -823,7 +876,13 @@ func downloadAndExtractWebDist(base, root, webDist, wantSHA string) error {
 		return err
 	}
 	if oldDist != "" {
-		_ = os.RemoveAll(oldDist)
+		// Keep exactly one previous frontend tree so a backend that fails to
+		// start after an update can be paired with working assets again.
+		previous := webDist + ".prev"
+		_ = os.RemoveAll(previous)
+		if err := os.Rename(oldDist, previous); err != nil {
+			_ = os.RemoveAll(oldDist)
+		}
 	}
 	_ = os.Remove(archive)
 	writeWebDistSHA256(webDist, wantSHA)

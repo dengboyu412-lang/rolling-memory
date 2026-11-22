@@ -91,13 +91,17 @@ name = "local"
 allow_loopback_llm = true
 
 [update]
-# stable = published release tags only (default)
+# stable = published release tags only (default for published installs)
 # beta   = release tags including prereleases
 # dev    = latest main commit (source rebuild; no automatic binary replacement)
-channel = "dev"
+channel = "stable"
 # github = official GitHub Releases (default)
 # gitee  = Gitee mirror, for networks that reach Gitee faster than GitHub
 source = "github"
+# off    = never check in the background
+# notify = check in the background and notify (default)
+# apply  = download, verify and install updates automatically
+auto = "notify"
 
 [daemon]
 # Background engine daemon memory cap (Go soft memory limit).
@@ -234,10 +238,12 @@ type StorageConfig struct {
 	Profile string
 }
 
-// UpdateConfig holds the release channel and source preferences ([update] section).
+// UpdateConfig holds the release channel, source and background policy
+// preferences ([update] section).
 type UpdateConfig struct {
 	Channel string
 	Source  string
+	Auto    string
 }
 
 // DaemonConfig holds background engine daemon settings ([daemon] section).
@@ -374,6 +380,11 @@ func Load(opts LoadOptions) (*Config, error) {
 	if updateSourceErr != nil {
 		return nil, newConfigError("%v", updateSourceErr)
 	}
+	updateAuto, updateAutoErr := updatechannel.NormalizeAuto(pyString(firstTruthy(
+		envValue(env, "ROLLING_MEMORY_UPDATE_AUTO"), updateTable["auto"], updatechannel.AutoDefault)))
+	if updateAutoErr != nil {
+		return nil, newConfigError("%v", updateAutoErr)
+	}
 	evalConfig := EvalConfig{
 		Answerer:   pyString(envOr(env, "ROLLING_MEMORY_EVAL_ANSWERER", getDefault(evalTable, "answerer", "none"))),
 		Judge:      pyString(envOr(env, "ROLLING_MEMORY_EVAL_JUDGE", getDefault(evalTable, "judge", "off"))),
@@ -437,7 +448,7 @@ func Load(opts LoadOptions) (*Config, error) {
 		Storage:          StorageConfig{Profile: storageProfile},
 		Daemon:           DaemonConfig{MemoryLimit: daemonMemoryLimit, SnapshotInterval: snapshotInterval},
 		Eval:             evalConfig,
-		Update:           UpdateConfig{Channel: updateChannel, Source: updateSource},
+		Update:           UpdateConfig{Channel: updateChannel, Source: updateSource, Auto: updateAuto},
 	}
 	if err := result.Validate(); err != nil {
 		return nil, err
@@ -457,6 +468,9 @@ func (c *Config) Validate() error {
 		return newConfigError("invalid scope %s", pyRepr(c.Scope))
 	}
 	if _, err := updatesource.Normalize(c.Update.Source); err != nil {
+		return newConfigError("%v", err)
+	}
+	if _, err := updatechannel.NormalizeAuto(c.Update.Auto); err != nil {
 		return newConfigError("%v", err)
 	}
 	if c.Recall.BudgetMS <= 0 {
@@ -665,6 +679,7 @@ func (c *Config) PublicDict() map[string]any {
 		"update": map[string]any{
 			"channel": c.Update.Channel,
 			"source":  c.Update.Source,
+			"auto":    c.Update.Auto,
 		},
 	}
 }
@@ -885,6 +900,13 @@ func SetConfigValue(path, dotted, rawValue string) (string, error) {
 	}
 	if section == "update" && key == "channel" {
 		canonical, err := updatechannel.Normalize(rawValue)
+		if err != nil {
+			return "", newConfigError("%v", err)
+		}
+		rawValue = canonical
+	}
+	if section == "update" && key == "auto" {
+		canonical, err := updatechannel.NormalizeAuto(rawValue)
 		if err != nil {
 			return "", newConfigError("%v", err)
 		}
@@ -1326,4 +1348,14 @@ func pySplitLines(value string) []string {
 		lines = append(lines, current.String())
 	}
 	return lines
+}
+
+// AnchorGateEnabled reports whether the experimental query anchor gate is on.
+// The gate is an A/B arm: unset keeps the frozen product and benchmark behaviour.
+func AnchorGateEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("ROLLING_MEMORY_ANCHOR_GATE"))) {
+	case "1", "on", "true", "yes":
+		return true
+	}
+	return false
 }

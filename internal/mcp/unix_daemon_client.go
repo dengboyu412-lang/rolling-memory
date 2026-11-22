@@ -96,13 +96,7 @@ func postVerifiedUnixDaemon(ctx context.Context, sockPath string, cfg *config.Co
 		return errors.New("invalid daemon response stream")
 	}
 	if resp.StatusCode != http.StatusOK {
-		var envelope struct {
-			Error string `json:"error"`
-		}
-		if json.Unmarshal(body, &envelope) == nil && strings.TrimSpace(envelope.Error) != "" {
-			return fmt.Errorf("daemon %s failed with status %d: %s", path, resp.StatusCode, envelope.Error)
-		}
-		return fmt.Errorf("daemon %s failed with status %d", path, resp.StatusCode)
+		return unixDaemonStatusError(path, resp.StatusCode, body)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.UseNumber()
@@ -113,6 +107,26 @@ func postVerifiedUnixDaemon(ctx context.Context, sockPath string, cfg *config.Co
 		return errors.New("invalid trailing daemon response")
 	}
 	return nil
+}
+
+// unixDaemonStatusError renders one non-200 daemon answer. JSON envelopes carry
+// an "error" field; handlers that answer with http.Error write the only
+// diagnostic as plain text, so that body is included (bounded) instead of being
+// dropped down to a bare status code.
+func unixDaemonStatusError(path string, status int, body []byte) error {
+	var envelope struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(body, &envelope) == nil && strings.TrimSpace(envelope.Error) != "" {
+		return fmt.Errorf("daemon %s failed with status %d: %s", path, status, envelope.Error)
+	}
+	if detail := strings.TrimSpace(string(body)); detail != "" {
+		if runes := []rune(detail); len(runes) > 256 {
+			detail = string(runes[:256]) + "…"
+		}
+		return fmt.Errorf("daemon %s failed with status %d: %s", path, status, detail)
+	}
+	return fmt.Errorf("daemon %s failed with status %d", path, status)
 }
 
 // CallUnixDaemonHydrate resolves one display-hydration batch over the verified local

@@ -37,6 +37,44 @@ func TestUpdateChannelFromEnvAndConfig(t *testing.T) {
 	}
 }
 
+func TestUpdateAutoFromEnvAndConfig(t *testing.T) {
+	t.Setenv("ROLLING_MEMORY_UPDATE_AUTO", "apply")
+	cfg, err := Load(LoadOptions{})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Update.Auto != "apply" {
+		t.Fatalf("env auto = %q, want apply", cfg.Update.Auto)
+	}
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("[update]\nauto = \"off\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ROLLING_MEMORY_UPDATE_AUTO", "")
+	cfg, err = Load(LoadOptions{Path: &path})
+	if err != nil {
+		t.Fatalf("Load file: %v", err)
+	}
+	if cfg.Update.Auto != "off" {
+		t.Fatalf("file auto = %q, want off", cfg.Update.Auto)
+	}
+
+	if _, err := SetConfigValue(path, "update.auto", "ALWAYS"); err == nil {
+		t.Fatal("invalid auto mode must be rejected")
+	}
+	if _, err := SetConfigValue(path, "update.auto", "APPLY"); err != nil {
+		t.Fatalf("SetConfigValue auto: %v", err)
+	}
+	cfg, err = Load(LoadOptions{Path: &path})
+	if err != nil {
+		t.Fatalf("Load after set: %v", err)
+	}
+	if cfg.Update.Auto != "apply" {
+		t.Fatalf("auto after set = %q, want apply", cfg.Update.Auto)
+	}
+}
+
 func TestSetUpdateSourceValidatesAndNormalizes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	if _, err := SetConfigValue(path, "update.source", "GITEE"); err != nil {

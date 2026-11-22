@@ -69,7 +69,7 @@ stepInstallText: 需要 Go 1.26 或更高版本。macOS 和 Linux 上，这一�
 stepCheckTitle: 检查是否接好
 stepCheckText: 确认每个 Agent 都能看到记忆工具。
 stepAdjustTitle: 不想要的都可以关
-stepAdjustText: 在 ZCode 和 Claude Code 里，安装时还会给每条提问加一个简短提醒，可能带上相关的过往记忆；同时在本地记一笔 recall 有没有帮上忙，供控制台统计。你可以只留 recall 工具、关掉这份记录，或者全部移除。
+stepAdjustText: 在支持钩子的宿主里（如 ZCode、Claude Code、Codex），安装时还会给每条提问加一个简短提醒，可能带上相关的过往记忆；同时在本地记一笔 recall 有没有帮上忙，供控制台统计。你可以只留 recall 工具、关掉这份记录，或者全部移除。
 adjustMcpOnly: 只保留 recall 工具：先移除提醒和技能文件，再重新接入
 adjustHooksOff: 关掉「recall 是否帮上忙」的本地记录（同时也会关掉重复过滤）
 adjustUninstall: 删掉安装时加的所有内容

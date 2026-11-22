@@ -80,6 +80,28 @@ func TestParseSHA256SumsAndVersionExtraction(t *testing.T) {
 	}
 }
 
+func TestUpdateAutoOffSkipsNetwork(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tempHome, ".local", "share"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempHome, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(tempHome, ".local", "state"))
+	t.Setenv("ROLLING_MEMORY_UPDATE_AUTO", "off")
+	t.Setenv("ROLLING_MEMORY_RELEASE_BASE", "http://127.0.0.1:1")
+	var out, errBuf bytes.Buffer
+	code := Main([]string{"update", "--auto", "--json"}, strings.NewReader(""), &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("update --auto off exit=%d, stderr=%s", code, errBuf.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal %q: %v", out.String(), err)
+	}
+	if payload["auto"] != "off" || payload["updated"] != false {
+		t.Fatalf("unexpected off result: %v", payload)
+	}
+}
+
 func TestUpdateCheckAndSelfUpdateLifecycle(t *testing.T) {
 	tempHome := t.TempDir()
 	t.Setenv("HOME", tempHome)
@@ -165,7 +187,21 @@ func TestUpdateCheckAndSelfUpdateLifecycle(t *testing.T) {
 		t.Fatalf("check must not modify binary")
 	}
 
-	// 2. Perform update with --with-console and --no-install (with a mock desktop .app bundle).
+	// 2. Background policy notify checks without replacing anything.
+	t.Setenv("ROLLING_MEMORY_UPDATE_AUTO", "notify")
+	code, autoRes := runCLI("update", "--auto", "--json")
+	if code != 0 {
+		t.Fatalf("update --auto notify exit=%d, res=%v", code, autoRes)
+	}
+	if autoRes["updated"] != false || autoRes["notified"] != true {
+		t.Fatalf("unexpected notify result: %v", autoRes)
+	}
+	if got, _ := os.ReadFile(targetBin); !bytes.Equal(got, oldCLIBin) {
+		t.Fatalf("notify policy must not modify the binary")
+	}
+
+	// 3. The apply policy performs the same verified install as a manual update.
+	// Perform update with --with-console and --no-install (with a mock desktop .app bundle).
 	mockPayload := filepath.Join(mockApp, "Contents", "Resources", "payload")
 	if err := os.MkdirAll(mockPayload, 0o755); err != nil {
 		t.Fatal(err)
@@ -176,7 +212,8 @@ func TestUpdateCheckAndSelfUpdateLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	code, updRes := runCLI("update", "--with-console", "--no-install", "--json")
+	t.Setenv("ROLLING_MEMORY_UPDATE_AUTO", "apply")
+	code, updRes := runCLI("update", "--auto", "--with-console", "--no-install", "--json")
 	if code != 0 {
 		t.Fatalf("update exit=%d, res=%v", code, updRes)
 	}

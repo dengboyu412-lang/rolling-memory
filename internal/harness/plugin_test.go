@@ -104,7 +104,7 @@ func TestInstallDedupesOwnedSurfacesWhenPluginProvidesThem(t *testing.T) {
 	if _, found := jsonLookup(data, []string{"mcp", "servers", DefaultName}); found {
 		t.Fatalf("dedupe left the CLI MCP entry in place")
 	}
-	if zcodeHasGlobalHooks(zcode[0], options) {
+	if configHasGlobalHooks(zcode[0], options) {
 		t.Fatalf("dedupe left the CLI hook in place")
 	}
 	assertNoFailures(t, Check(zcode, options, false))
@@ -349,7 +349,7 @@ func assertPluginSurfacesPreserved(t *testing.T, report *Report, h Harness, opti
 				}
 			}
 		case "hooks":
-			if !zcodeHasGlobalHooks(h, options) {
+			if !configHasGlobalHooks(h, options) {
 				t.Fatal("existing hook removed")
 			}
 		}
@@ -384,7 +384,7 @@ func TestEmptyPluginHooksKeepGlobalHook(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertNoFailures(t, Install(zcodeOnly, options))
-	if !zcodeHasGlobalHooks(zcodeOnly[0], options) {
+	if !configHasGlobalHooks(zcodeOnly[0], options) {
 		t.Fatal("empty plugin hooks removed the existing global hook")
 	}
 	assertNoFailures(t, Check(zcodeOnly, options, false))

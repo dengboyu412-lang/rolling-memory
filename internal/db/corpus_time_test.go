@@ -5,6 +5,7 @@ package db_test
 
 import (
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -59,6 +60,26 @@ func TestReadTimeConcentration(t *testing.T) {
 	}
 	if got.Collapsed() {
 		t.Fatal("a small corpus must not be reported as collapsed")
+	}
+
+	// Background slices and other clockless units carry occurred_at = 0; they
+	// never enter a spacetime bucket, so they must not read as one collapsed
+	// instant group.
+	for i := 0; i < 50; i++ {
+		if _, err := connection.Exec(
+			`INSERT INTO rm_docs(unit_id, occurred_at) VALUES (?, 0)`,
+			fmt.Sprintf("bg-%02d", i),
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	withoutClock, err := db.ReadTimeConcentration(connection)
+	if err != nil {
+		t.Fatalf("read with clockless units: %v", err)
+	}
+	if withoutClock.Docs != 5 || withoutClock.DistinctInstants != 2 ||
+		withoutClock.LargestGroup != 3 || withoutClock.SameInstantPairs != 4 {
+		t.Fatalf("clockless units leaked into the distribution: %+v", withoutClock)
 	}
 }
 

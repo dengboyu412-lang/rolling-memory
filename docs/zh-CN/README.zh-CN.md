@@ -209,7 +209,7 @@ rolling-memory update --release-base https://your-mirror.example.com/releases/la
 
 你也可以在 Web 管理控制台（「记忆总览」或「记忆控制台」顶部操作栏）点击 **「版本与在线更新」**，在浏览器内查看本地组件的 SHA-256 指纹、在线检查新版并一键原位升级。升级过程仅替换可执行文件、前端静态资源与宿主配置接线，**绝不触碰或覆盖你的本地 SQLite 明文金库（`memory.db`）**。
 
-> **早期阶段默认通道**：新安装默认跟随 `dev`（`main` 最新提交）。可随时用 `rolling-memory config set update.channel stable` 或控制台更新弹窗切换到 `stable` / `beta`。完整通道、破坏性变更、备份与回滚说明见[安装与升级指南](install-upgrade.md)。
+> **升级默认值**：预编译安装跟随 `stable` 并在后台安装经过校验的更新；源码安装跟随 `dev` 并只做通知。通道与 `update.auto` 策略可随时在控制台更新弹窗或用 `rolling-memory config set update.channel` 修改。完整通道、破坏性变更、备份与回滚说明见[安装与升级指南](install-upgrade.md)。
 
 ---
 

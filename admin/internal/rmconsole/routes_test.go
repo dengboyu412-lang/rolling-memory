@@ -174,8 +174,10 @@ func TestCollectDashboardData(t *testing.T) {
 	if sumInts(resp.Trend1D.L1Added) != 2 || sumInts(resp.Trend1D.L2Added) != 1 || sumInts(resp.Trend1D.L3Added) != 1 || sumInts(resp.Trend1D.Assertions) != 4 {
 		t.Fatalf("unexpected Trend1D layer sums: %+v", resp.Trend1D)
 	}
-	if resp.TotalHookEvents != 3 || resp.InjectedEvents != 3 || resp.AvgRecallMS != 200 {
-		t.Fatalf("unexpected hook stats: total=%d injected=%d avgMS=%d", resp.TotalHookEvents, resp.InjectedEvents, resp.AvgRecallMS)
+	// Hook counters still come from the hook log, but recall latency comes only
+	// from the ledger's self-recorded MCP timer; this fixture has no ledger.
+	if resp.TotalHookEvents != 3 || resp.InjectedEvents != 3 || resp.AvgRecallMS != 0 || resp.LatencySamples != 0 {
+		t.Fatalf("unexpected hook stats: total=%d injected=%d avgMS=%d samples=%d", resp.TotalHookEvents, resp.InjectedEvents, resp.AvgRecallMS, resp.LatencySamples)
 	}
 	if len(resp.Trend1H.Dates) != 12 || len(resp.Trend1D.Dates) != 24 || len(resp.Trend7D.Dates) != 7 || len(resp.Trend30D.Dates) != 30 {
 		t.Fatalf("unexpected trend lengths: 1h=%d 1d=%d 7d=%d 30d=%d", len(resp.Trend1H.Dates), len(resp.Trend1D.Dates), len(resp.Trend7D.Dates), len(resp.Trend30D.Dates))
@@ -807,6 +809,7 @@ func TestNativeRoutesMountWithoutPluginRegistry(t *testing.T) {
 		"/admin/plugin/rolling-memory/system/version":        false,
 		"/admin/plugin/rolling-memory/system/update/status":  false,
 		"/admin/plugin/rolling-memory/system/update/channel": false,
+		"/admin/plugin/rolling-memory/system/update/auto":    false,
 		"/admin/plugin/rolling-memory/system/update/source":  false,
 		"/admin/plugin/rolling-memory/system/update/check":   false,
 		"/admin/plugin/rolling-memory/system/update/apply":   false,

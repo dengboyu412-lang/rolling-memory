@@ -28,8 +28,14 @@ const defaultConsoleUpdateReleaseBase = "https://github.com/rocareer/" + Name + 
 const defaultConsoleGiteeReleaseBase = "https://gitee.com/rocareer/Rolling-Memory/releases/latest/download"
 
 const (
-	updateStateCheckInterval = 6 * time.Hour
+	// updateStateCheckInterval 是控制台在线时共享版本缓存的刷新周期。
+	// 控制台通过 rm/update 实时帧按此周期触发检查；CLI / MCP 仍使用
+	// updatecheck.CheckInterval（6 小时），避免把轻量工具也变成高频网络客户端。
+	updateStateCheckInterval = 10 * time.Minute
 	updateStateRetryInterval = 30 * time.Minute
+	// updateCheckMinInterval 合并多标签页 / 多组件同时发起的检查请求；
+	// 是否“到期”由共享缓存状态决定（成功 10 分钟、失败 30 分钟）。
+	updateCheckMinInterval = time.Minute
 )
 
 var (
@@ -148,6 +154,21 @@ func updateStateStale(home string) (map[string]any, bool) {
 	return state, time.Since(time.Unix(checked, 0)) >= interval
 }
 
+// updateCheckRecentlyFailed reports whether the last attempt failed inside the
+// retry window. Explicit dashboard refreshes still respect this backoff so a
+// transient outage does not turn every open tab into a retry loop.
+func updateCheckRecentlyFailed(home string) bool {
+	state, ok := readUpdateState(home)
+	if !ok {
+		return false
+	}
+	if failed, _ := state["ok"].(bool); failed {
+		return false
+	}
+	checked := stateCheckedUnix(state)
+	return checked > 0 && time.Since(time.Unix(checked, 0)) < updateStateRetryInterval
+}
+
 func updateCheckAutoEnabled() bool {
 	if strings.HasSuffix(os.Args[0], ".test") || strings.Contains(os.Args[0], ".test.") {
 		return false
@@ -167,8 +188,8 @@ func updateCheckIsRunning() bool {
 }
 
 // triggerUpdateCheckAsync refreshes the shared cache without blocking the
-// request. A failed attempt is throttled so a browser tab or a stale console
-// cannot stampede the release channel.
+// request. Concurrent callers are coalesced; the caller decides whether the
+// cached snapshot is due via updateStateStale (or an explicit force refresh).
 func triggerUpdateCheckAsync(home, releaseBase string) {
 	if !updateCheckAutoEnabled() {
 		return
@@ -181,7 +202,7 @@ func triggerUpdateCheckAsync(home, releaseBase string) {
 		return
 	}
 	updateCheckMu.Lock()
-	if updateCheckRunning || time.Since(updateCheckLast) < updateStateRetryInterval {
+	if updateCheckRunning || time.Since(updateCheckLast) < updateCheckMinInterval {
 		updateCheckMu.Unlock()
 		return
 	}
@@ -257,37 +278,43 @@ func updateDataDir(home string) string {
 	return filepath.Join(home, ".local", "share", "rolling-memory")
 }
 
-func configuredUpdatePrefs(home string) (channel, source string) {
+func configuredUpdatePrefs(home string) (channel, source, auto string) {
 	bin := resolveRealCLIBinary(home)
 	if bin == "" {
-		return "", ""
+		return "", "", ""
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, bin, "config", "show", "--json").Output()
 	if err != nil {
-		return "", ""
+		return "", "", ""
 	}
 	var payload struct {
 		Update struct {
 			Channel string `json:"channel"`
 			Source  string `json:"source"`
+			Auto    string `json:"auto"`
 		} `json:"update"`
 	}
 	if err := json.Unmarshal(out, &payload); err != nil {
-		return "", ""
+		return "", "", ""
 	}
-	return strings.TrimSpace(payload.Update.Channel), strings.TrimSpace(payload.Update.Source)
+	return strings.TrimSpace(payload.Update.Channel), strings.TrimSpace(payload.Update.Source), strings.TrimSpace(payload.Update.Auto)
 }
 
 func configuredUpdateChannel(home string) string {
-	channel, _ := configuredUpdatePrefs(home)
+	channel, _, _ := configuredUpdatePrefs(home)
 	return channel
 }
 
 func configuredUpdateSource(home string) string {
-	_, source := configuredUpdatePrefs(home)
+	_, source, _ := configuredUpdatePrefs(home)
 	return strings.ToLower(strings.TrimSpace(source))
+}
+
+func configuredUpdateAuto(home string) string {
+	_, _, auto := configuredUpdatePrefs(home)
+	return strings.ToLower(strings.TrimSpace(auto))
 }
 
 func installMethodFromDisk(home string) string {
@@ -313,6 +340,7 @@ type systemUpdateRequest struct {
 	ReleaseBase string `json:"release_base"`
 	Channel     string `json:"channel"`
 	Source      string `json:"source"`
+	Auto        string `json:"auto"`
 	Force       bool   `json:"force"`
 	WithConsole *bool  `json:"with_console"`
 	NoInstall   bool   `json:"no_install"`
@@ -513,7 +541,7 @@ func systemVersionHandler(c *gin.Context) {
 	_, webStatErr := os.Stat(filepath.Join(webDist, "index.html"))
 	releaseBase := resolveConsoleReleaseBase("")
 	updateState, _ := readUpdateState(home)
-	updateChannel, updateSource := configuredUpdatePrefs(home)
+	updateChannel, updateSource, updateAuto := configuredUpdatePrefs(home)
 	if updateChannel == "" {
 		updateChannel, _ = updateState["channel"].(string)
 	}
@@ -533,6 +561,7 @@ func systemVersionHandler(c *gin.Context) {
 		"install_method":          installMethodFromDisk(home),
 		"update_channel":          updateChannel,
 		"update_source":           updateSource,
+		"update_auto":             updateAuto,
 		"update_state":            updateState,
 		"cli": gin.H{
 			"path":         cliBin,
@@ -553,9 +582,12 @@ func systemVersionHandler(c *gin.Context) {
 // blocks on the network; the web console receives the refreshed frame over the
 // rm/update WebSocket room.
 func systemUpdateStatusHandler(c *gin.Context) {
+	var req systemUpdateRequest
+	_ = c.ShouldBindJSON(&req)
 	home, _ := os.UserHomeDir()
 	state, stale := updateStateStale(home)
-	if stale {
+	force := req.Force && !updateCheckRecentlyFailed(home)
+	if force || stale {
 		triggerUpdateCheckAsync(home, "")
 	}
 	httpx.Success(c, httpx.WithData(gin.H{
@@ -564,6 +596,7 @@ func systemUpdateStatusHandler(c *gin.Context) {
 		"available":      state != nil,
 		"stale":          stale,
 		"checking":       updateCheckIsRunning(),
+		"forced":         force,
 		"install_method": installMethodFromDisk(home),
 	}))
 }
@@ -598,8 +631,26 @@ func systemUpdateChannelHandler(c *gin.Context) {
 		httpx.Fail(c, httpx.WithMessage(message))
 		return
 	}
+	if configuredUpdateAuto(home) != "off" {
+		_ = installUpdateSchedule(ctx, bin)
+	}
 	triggerUpdateCheckAsync(home, "")
 	httpx.Success(c, httpx.WithData(gin.H{"ok": true, "channel": channel}))
+}
+
+// installUpdateSchedule refreshes the user-level task so it carries the
+// current channel/source release base. Errors are returned to the caller for
+// reporting but never block saving the preference.
+func installUpdateSchedule(ctx context.Context, bin string) string {
+	out, err := exec.CommandContext(ctx, bin, "update", "--schedule", "install", "--quiet").CombinedOutput()
+	if err == nil {
+		return ""
+	}
+	message := strings.TrimSpace(string(out))
+	if message == "" {
+		message = err.Error()
+	}
+	return message
 }
 
 // systemUpdateSourceHandler persists the release source (github or gitee)
@@ -633,8 +684,58 @@ func systemUpdateSourceHandler(c *gin.Context) {
 		return
 	}
 	releaseBase := resolveConsoleReleaseBase("")
+	if configuredUpdateAuto(home) != "off" {
+		_ = installUpdateSchedule(ctx, bin)
+	}
 	triggerUpdateCheckAsync(home, "")
 	httpx.Success(c, httpx.WithData(gin.H{"ok": true, "source": source, "release_base": releaseBase}))
+}
+
+// systemUpdateAutoHandler persists the background update policy and keeps the
+// OS-level schedule in sync. "off" removes the schedule; notify/apply install
+// it so the policy is applied without the console being open.
+func systemUpdateAutoHandler(c *gin.Context) {
+	var req systemUpdateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		httpx.Fail(c, httpx.WithMessage("invalid request body"))
+		return
+	}
+	auto := strings.ToLower(strings.TrimSpace(req.Auto))
+	if auto != "off" && auto != "notify" && auto != "apply" {
+		httpx.Fail(c, httpx.WithMessage("auto must be off, notify or apply"))
+		return
+	}
+	home, _ := os.UserHomeDir()
+	bin := resolveRealCLIBinary(home)
+	if bin == "" {
+		httpx.Fail(c, httpx.WithMessage("rolling-memory CLI binary not found"))
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
+	defer cancel()
+	if out, err := exec.CommandContext(ctx, bin, "config", "set", "update.auto", auto).CombinedOutput(); err != nil {
+		message := strings.TrimSpace(string(out))
+		if message == "" {
+			message = err.Error()
+		}
+		httpx.Fail(c, httpx.WithMessage(message))
+		return
+	}
+	action := "install"
+	if auto == "off" {
+		action = "remove"
+	}
+	scheduleErr := ""
+	if out, err := exec.CommandContext(ctx, bin, "update", "--schedule", action, "--quiet").CombinedOutput(); err != nil {
+		scheduleErr = strings.TrimSpace(string(out))
+		if scheduleErr == "" {
+			scheduleErr = err.Error()
+		}
+	}
+	triggerUpdateCheckAsync(home, "")
+	httpx.Success(c, httpx.WithData(gin.H{
+		"ok": true, "auto": auto, "schedule_action": action, "schedule_error": scheduleErr,
+	}))
 }
 
 // systemUpdateCheckHandler runs `rolling-memory update --check --with-console --json`
@@ -743,14 +844,17 @@ func systemUpdateApplyHandler(c *gin.Context) {
 	// has been flushed to the browser.
 	if deferred, _ := payload["console_restart_deferred"].(bool); deferred {
 		updatedBin := resolveRealCLIBinary(home)
-		go func(cliBinary string) {
-			time.Sleep(600 * time.Millisecond)
-			if cliBinary == "" {
-				return
-			}
-			_ = exec.Command(cliBinary, "panel", "stop").Run()
-			_ = exec.Command(cliBinary, "panel", "start", "--no-open").Start()
-		}(updatedBin)
+		if updatedBin != "" {
+			logPath := filepath.Join(home, ".local", "state", "rolling-memory", "console-restart.log")
+			// The helper must outlive the backend it stops: a goroutine inside
+			// this process disappears together with the process, leaving the
+			// console stopped. A detached new session survives and completes
+			// the stop/start cycle.
+			go func(cliBinary, logPath string) {
+				time.Sleep(600 * time.Millisecond)
+				_ = startDetached(logPath, cliBinary, "panel", "restart", "--no-open")
+			}(updatedBin, logPath)
+		}
 	}
 
 	httpx.Success(c, httpx.WithData(payload))

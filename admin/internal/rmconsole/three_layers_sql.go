@@ -325,7 +325,7 @@ func queryLayerRowsWithHydratedRefs(dbPath string, q layerListQuery, home string
 	rows := make([]map[string]any, 0, len(plainRows)+len(candPtrs))
 	rows = append(rows, plainRows...)
 	rows = append(rows, candPtrs...)
-	warmHydrateZCodePointersBatch(home, dbPath, rows)
+	warmHydratePointersBatch(home, dbPath, rows)
 	warmHydrateLocalDocumentsBatch(home, rows)
 
 	// 快速分页路径：当排序字段不依赖水合正文且无 wheres 时，非 @ref: 行在 SQL 侧已精确过滤，
@@ -928,7 +928,7 @@ func queryLayerRows(dbPath string, q layerListQuery, home string) ([]ThreeLayerR
 			fastPageSQL := "SELECT layer, src, id, status, title, content, answer_text, address_uri, rel_path, anchor, abs_path, occurred_at, cited_json FROM (" +
 				strings.Join(branches, " UNION ALL ") + ")" + layerOrderSQL(q.sort, q.order) + " LIMIT ? OFFSET ?"
 			if rows, fErr := sqliteQueryJSONArgs(dbPath, fastPageSQL, q.limit, q.offset); fErr == nil {
-				warmHydrateZCodePointersBatch(home, dbPath, rows)
+				warmHydratePointersBatch(home, dbPath, rows)
 				warmHydrateLocalDocumentsBatch(home, rows)
 				items := make([]ThreeLayerRow, 0, len(rows))
 				for _, r := range rows {
@@ -949,7 +949,7 @@ func queryLayerRows(dbPath string, q layerListQuery, home string) ([]ThreeLayerR
 			" FROM (" + union + ") AS u WHERE " + whereSQL + layerOrderSQL(q.sort, q.order) + " LIMIT ?"
 		probeArgs := append(append(append([]any{}, unionArgs...), whereArgs...), q.limit+1)
 		if probeRows, pErr := sqliteQueryJSONArgs(dbPath, probeSQL, probeArgs...); pErr == nil && len(probeRows) <= q.limit {
-			warmHydrateZCodePointersBatch(home, dbPath, probeRows)
+			warmHydratePointersBatch(home, dbPath, probeRows)
 			warmHydrateLocalDocumentsBatch(home, probeRows)
 			items := make([]ThreeLayerRow, 0, len(probeRows))
 			for _, r := range probeRows {
@@ -979,7 +979,7 @@ func queryLayerRows(dbPath string, q layerListQuery, home string) ([]ThreeLayerR
 	if err != nil {
 		return nil, 0, err
 	}
-	warmHydrateZCodePointersBatch(home, dbPath, rows)
+	warmHydratePointersBatch(home, dbPath, rows)
 	warmHydrateLocalDocumentsBatch(home, rows)
 	items := make([]ThreeLayerRow, 0, len(rows))
 	for _, r := range rows {

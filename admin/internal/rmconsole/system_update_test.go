@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSystemVersionAndUpdateHandlers(t *testing.T) {
@@ -81,6 +82,20 @@ exit 1
 		t.Fatalf("unexpected status response: %+v", statusResp)
 	}
 
+	// 3a. force refresh is accepted without blocking; the async check itself is
+	// skipped in test binaries, but the request contract is still pinned.
+	forceRaw := callPluginHandler(t, systemUpdateStatusHandler, "/admin/plugin/rolling-memory/system/update/status", `{"force":true}`)
+	var forceResp struct {
+		Code int            `json:"code"`
+		Data map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(forceRaw), &forceResp); err != nil {
+		t.Fatalf("unmarshal forced status response: %v (%s)", err, forceRaw)
+	}
+	if forceResp.Code != 0 || forceResp.Data["forced"] != true {
+		t.Fatalf("unexpected forced status response: %+v", forceResp)
+	}
+
 	// 3b. /system/update/channel persists the channel through the CLI.
 	channelRaw := callPluginHandler(t, systemUpdateChannelHandler, "/admin/plugin/rolling-memory/system/update/channel", `{"channel":"beta"}`)
 	var channelResp struct {
@@ -111,6 +126,24 @@ exit 1
 		t.Fatalf("expected invalid source rejection, got %s", badSourceRaw)
 	}
 
+	// 3d. /system/update/auto persists the background policy and rejects
+	// unknown values.
+	autoRaw := callPluginHandler(t, systemUpdateAutoHandler, "/admin/plugin/rolling-memory/system/update/auto", `{"auto":"apply"}`)
+	var autoResp struct {
+		Code int            `json:"code"`
+		Data map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(autoRaw), &autoResp); err != nil {
+		t.Fatalf("unmarshal auto response: %v (%s)", err, autoRaw)
+	}
+	if autoResp.Code != 0 || autoResp.Data["auto"] != "apply" || autoResp.Data["schedule_action"] != "install" {
+		t.Fatalf("unexpected auto response: %+v", autoResp)
+	}
+	badAutoRaw := callPluginHandler(t, systemUpdateAutoHandler, "/admin/plugin/rolling-memory/system/update/auto", `{"auto":"always"}`)
+	if !strings.Contains(badAutoRaw, "auto must be off, notify or apply") {
+		t.Fatalf("expected invalid auto rejection, got %s", badAutoRaw)
+	}
+
 	// 4. /system/update/check returns parsed check payload.
 	chkRaw := callPluginHandler(t, systemUpdateCheckHandler, "/admin/plugin/rolling-memory/system/update/check", `{"release_base":"https://example.com/releases"}`)
 	var chkResp struct {
@@ -135,5 +168,55 @@ exit 1
 	}
 	if appResp.Code != 0 || appResp.Data["updated"] != true || appResp.Data["latest_tag"] != "0.0.2" {
 		t.Fatalf("unexpected apply response: %+v", appResp)
+	}
+}
+
+// TestUpdateStateStaleUsesTenMinuteConsoleWindow 锁定控制台在线时的刷新周期：
+// 成功快照 10 分钟后过期，失败快照仍按 30 分钟重试。
+func TestUpdateStateStaleUsesTenMinuteConsoleWindow(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, "state"))
+	t.Setenv("ROLLING_MEMORY_PORTABLE", "")
+
+	writeState := func(age time.Duration, ok bool) {
+		t.Helper()
+		checked := time.Now().Add(-age)
+		payload := map[string]any{
+			"ok":               ok,
+			"checked_at":       checked.UTC().Format(time.RFC3339),
+			"checked_at_unix":  checked.Unix(),
+			"update_available": true,
+		}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := updateStatePath(home)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, raw, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	writeState(9*time.Minute, true)
+	if _, stale := updateStateStale(home); stale {
+		t.Fatal("a successful snapshot younger than 10 minutes must stay fresh")
+	}
+
+	writeState(11*time.Minute, true)
+	if _, stale := updateStateStale(home); !stale {
+		t.Fatal("a successful snapshot older than 10 minutes must be stale")
+	}
+
+	writeState(29*time.Minute, false)
+	if _, stale := updateStateStale(home); stale {
+		t.Fatal("a failed snapshot must keep the 30-minute retry window")
+	}
+
+	writeState(31*time.Minute, false)
+	if _, stale := updateStateStale(home); !stale {
+		t.Fatal("a failed snapshot older than 30 minutes must be stale")
 	}
 }

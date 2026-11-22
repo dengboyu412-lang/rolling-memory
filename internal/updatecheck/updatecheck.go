@@ -25,6 +25,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -191,6 +192,16 @@ func Check(ctx context.Context, opts Options) (Result, error) {
 			result.Source = "github-main"
 		}
 		result.UpdateAvailable = !strings.EqualFold(installedCommit, head.SHA)
+		// 本机 commit 与 main 不同时，再用提交时间区分“落后”与“本地领先”。
+		// 仅当两端都有可解析时间时启用；install.json 没有 commit_date 时保持
+		// 原有的 SHA 比较口径。
+		if result.UpdateAvailable && strings.TrimSpace(metadata.CommitDate) != "" && strings.TrimSpace(head.Date) != "" {
+			if installedAt, parseErr := time.Parse(time.RFC3339, metadata.CommitDate); parseErr == nil {
+				if headAt, parseErr := time.Parse(time.RFC3339, head.Date); parseErr == nil {
+					result.UpdateAvailable = headAt.After(installedAt)
+				}
+			}
+		}
 		result.DowngradeAvailable = false
 		result.OK = true
 		markChecked(&result.State)
@@ -839,23 +850,26 @@ func WriteState(state State) error {
 
 // InstallMetadata is the provenance written by install.sh / install.ps1.
 type InstallMetadata struct {
-	Method string `json:"method"`
-	Repo   string `json:"repo"`
-	Ref    string `json:"ref"`
-	Commit string `json:"commit"`
-	Asset  string `json:"asset"`
+	Method     string `json:"method"`
+	Repo       string `json:"repo"`
+	Ref        string `json:"ref"`
+	Commit     string `json:"commit"`
+	CommitDate string `json:"commit_date,omitempty"`
+	Asset      string `json:"asset"`
 }
 
-// ReadInstallMetadata reads the install provenance.
+// ReadInstallMetadata reads the install provenance. When install.json is
+// absent (manual builds, go install), the Go build's embedded VCS revision is
+// used as a read-only baseline so the dev channel can still compare main.
 func ReadInstallMetadata() InstallMetadata {
 	path := filepath.Join(DataDir(), "install.json")
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return InstallMetadata{Method: "unknown"}
+		return installMetadataWithBuildInfo(InstallMetadata{Method: "unknown"})
 	}
 	var meta InstallMetadata
 	if err := json.Unmarshal(raw, &meta); err != nil {
-		return InstallMetadata{Method: "unknown"}
+		return installMetadataWithBuildInfo(InstallMetadata{Method: "unknown"})
 	}
 	meta.Method = strings.ToLower(strings.TrimSpace(meta.Method))
 	switch meta.Method {
@@ -863,7 +877,46 @@ func ReadInstallMetadata() InstallMetadata {
 	default:
 		meta.Method = "unknown"
 	}
+	return installMetadataWithBuildInfo(meta)
+}
+
+func installMetadataWithBuildInfo(meta InstallMetadata) InstallMetadata {
+	if strings.TrimSpace(meta.Commit) != "" || IsTestBinary() {
+		return meta
+	}
+	revision, commitTime := buildInfoVCS()
+	if revision == "" {
+		return meta
+	}
+	meta.Commit = revision
+	if strings.TrimSpace(meta.CommitDate) == "" {
+		meta.CommitDate = commitTime
+	}
 	return meta
+}
+
+func buildInfoVCS() (string, string) {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "", ""
+	}
+	return vcsFromBuildInfo(info)
+}
+
+func vcsFromBuildInfo(info *debug.BuildInfo) (string, string) {
+	if info == nil {
+		return "", ""
+	}
+	var revision, commitTime string
+	for _, setting := range info.Settings {
+		switch setting.Key {
+		case "vcs.revision":
+			revision = strings.TrimSpace(setting.Value)
+		case "vcs.time":
+			commitTime = strings.TrimSpace(setting.Value)
+		}
+	}
+	return revision, commitTime
 }
 
 // ResolveChannel resolves an explicit flag, environment, config, then the

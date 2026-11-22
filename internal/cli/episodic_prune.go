@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/rocareer/rolling-memory/internal/config"
+	"github.com/rocareer/rolling-memory/internal/harness"
 	"github.com/rocareer/rolling-memory/internal/ids"
 	"github.com/rocareer/rolling-memory/internal/mcp"
 	"github.com/rocareer/rolling-memory/internal/memory/facade"
@@ -398,7 +399,7 @@ func pruneOrphanNoeticAndHealLoci(ctx context.Context, db *sql.DB, beforeDelete 
 	sessionLocus := make(map[string]string, 256)
 	dirLocusCache := make(map[string]string, 32)
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		zdbPath := filepath.Join(home, ".zcode", "cli", "db", "db.sqlite")
+		zdbPath := harness.SessionStorePath(home, "zcode")
 		if _, statErr := os.Stat(zdbPath); statErr == nil {
 			if zdb, oErr := sql.Open("sqlite", ids.SQLiteFileURI(zdbPath)+"?mode=ro&_pragma=busy_timeout(1500)"); oErr == nil {
 				if sRows, qErr := zdb.QueryContext(ctx, `SELECT id, COALESCE(directory, '') FROM session WHERE COALESCE(directory, '') <> ''`); qErr == nil {

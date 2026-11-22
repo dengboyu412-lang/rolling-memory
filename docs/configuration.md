@@ -82,10 +82,13 @@ Accepted values:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `update.channel` | `dev` | `dev` tracks the latest `main` commit (default); `stable` accepts published release tags; `beta` also accepts prerelease tags |
+| `update.channel` | `stable` | `stable` accepts published release tags (default); `beta` also accepts prerelease tags; `dev` tracks the latest `main` commit for source builds |
 | `update.source` | `github` | `github` uses the official GitHub Releases channel; `gitee` uses the Gitee mirror for networks that reach Gitee faster |
+| `update.auto` | `notify` | `off` disables background checks; `notify` checks every six hours and notifies; `apply` downloads, verifies and installs automatically |
 
-`dev` reports `main@<commit>` and requires a source rebuild; it never replaces a binary automatically. Save the preference with `rmem config set update.channel beta`, switch it in the console's Version & Update dialog, or override one check with `rmem update --check --channel dev`.
+`dev` reports `main@<commit>` and requires a source rebuild; it never replaces a binary automatically. Save the preference with `rmem config set update.channel beta`, switch it in the console's Version & Update dialog, or override one check with `rmem update --check --channel dev`. The installer writes `stable` for published installs and `dev` for source builds.
+
+`update.auto` is saved with `rmem config set update.auto apply` or selected in **Version & Update → Background Updates**. Published installs default to `apply`; source installs default to `notify`. Run the same policy manually with `rmem update --auto`.
 
 The source is saved with `rmem config set update.source gitee` and can be selected in the console's Version & Update dialog. An explicit `--release-base` URL or `ROLLING_MEMORY_RELEASE_BASE` still wins for one run. When the Gitee mirror has no prebuilt artifacts for a tag, the check reports a source-only update instead of offering a download that cannot succeed.
 
@@ -105,6 +108,7 @@ Every `config.toml` key has an environment counterpart that wins over the file; 
 | `ROLLING_MEMORY_DELIVERY_WINDOW` | `recall.delivery_window` |
 | `ROLLING_MEMORY_UPDATE_CHANNEL` | `update.channel` |
 | `ROLLING_MEMORY_UPDATE_SOURCE` | `update.source` |
+| `ROLLING_MEMORY_UPDATE_AUTO` | `update.auto` |
 | `ROLLING_MEMORY_DAEMON_MEMORY_LIMIT` | `daemon.memory_limit` |
 | `ROLLING_MEMORY_SNAPSHOT_INTERVAL` | `daemon.snapshot_interval` |
 | `ROLLING_MEMORY_DAEMON_SOCKET` | Engine socket path |

@@ -364,6 +364,9 @@ const agentsAuto = [
     { name: 'Codex', id: 'codex' },
     { name: 'CodeBuddy', id: 'codebuddy' },
     { name: 'dsh', id: 'dsh' },
+    { name: 'OpenCode', id: 'opencode' },
+    { name: 'WorkBuddy', id: 'workbuddy' },
+    { name: 'Doubao', id: 'doubao' },
 ]
 const agentsNamed = [
     { name: 'Cursor', id: 'cursor' },

@@ -688,16 +688,9 @@ func envHealthChangeSignature(home, cfgPath, dbPath, logPath string) string {
 		dbPath,
 		logPath,
 		filepath.Join(rollingMemoryStateDir(home), "active_workspace.json"),
-		// 宿主会话库主文件：配合 active_workspace.json 与 Hook 日志覆盖回合级活跃变化。
-		filepath.Join(home, ".zcode", "cli", "db", "db.sqlite"),
-		// 各 Harness 的历史根目录：目录 mtime 覆盖「新会话落盘」。
-		filepath.Join(home, ".zcode", "projects"),
-		filepath.Join(home, ".claude", "projects"),
-		filepath.Join(home, ".codex", "sessions"),
-		filepath.Join(home, ".dsh", "sessions"),
-		filepath.Join(home, ".codebuddy", "projects"),
-		filepath.Join(home, ".workbuddy", "projects"),
 	}
+	// 宿主会话库与历史根目录：覆盖回合级活跃变化与新会话落盘，全部宿主同一份清单。
+	paths = append(paths, harnessActivityPaths(home)...)
 	var b strings.Builder
 	for _, p := range paths {
 		if st, err := os.Stat(p); err == nil {
@@ -730,15 +723,15 @@ func terminalStreamSignature(home, dbPath, logPath string, limit int) string {
 // roiFactsChangeSignature ROI 流的变更指纹：金库 + 效能台账 + 宿主 recall 流水（ROI 聚合的全部输入面）。
 func roiFactsChangeSignature(home, dbPath string) string {
 	var b strings.Builder
-	for _, p := range []string{
+	paths := []string{
 		dbPath,
 		dbPath + "-wal",
 		dbPath + ".efficacy.sqlite",
 		dbPath + ".efficacy.sqlite-wal",
 		filepath.Join(home, ".config", "rolling-memory", "config.toml"),
-		filepath.Join(home, ".zcode", "cli", "db", "db.sqlite"),
-		filepath.Join(home, ".zcode", "cli", "db", "db.sqlite-wal"),
-	} {
+	}
+	paths = append(paths, harnessActivityPaths(home)...)
+	for _, p := range paths {
 		if st, err := os.Stat(p); err == nil {
 			fmt.Fprintf(&b, "%s:%d@%d;", p, st.Size(), st.ModTime().UnixNano())
 		} else {

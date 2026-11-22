@@ -1587,6 +1587,7 @@ func (e *LocalEngine) ensureCoreRMEngine() (*core.Engine, *plain.TermExtractor, 
 				wg.Wait()
 				idx := core.BuildIndex(rmDocs)
 				eng := core.NewEngine(idx)
+				eng.AnchorGate = config.AnchorGateEnabled()
 				_ = core.WriteDiskClusterCSR(zcsrPath, eng)
 				e.coreEngine = eng
 				e.coreTermExtractor = te
@@ -1626,6 +1627,7 @@ func (e *LocalEngine) ensureCoreRMEngine() (*core.Engine, *plain.TermExtractor, 
 	wg.Wait()
 	idx := core.BuildIndex(rmDocs)
 	eng := core.NewEngine(idx)
+	eng.AnchorGate = config.AnchorGateEnabled()
 	_ = core.WriteDiskClusterCSR(zcsrPath, eng)
 	e.coreEngine = eng
 	e.coreTermExtractor = te

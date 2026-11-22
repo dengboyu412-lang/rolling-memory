@@ -1282,12 +1282,14 @@ const harnessOptions = computed(() => [
     { value: 'zcode', label: 'ZCode' },
     { value: 'claude-code', label: 'Claude Code' },
     { value: 'codex', label: 'Codex' },
+    { value: 'opencode', label: 'OpenCode' },
     { value: 'workbuddy', label: 'WorkBuddy' },
     { value: 'codebuddy', label: 'CodeBuddy' },
     { value: 'cursor', label: 'Cursor' },
     { value: 'windsurf', label: 'Windsurf' },
     { value: 'cline', label: 'Cline' },
     { value: 'dsh', label: 'DSH' },
+    { value: 'doubao', label: 'Doubao' },
 ])
 
 const drawerVisible = ref(false)

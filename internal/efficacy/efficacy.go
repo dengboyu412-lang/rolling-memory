@@ -348,32 +348,18 @@ func Evaluate(db *sql.DB, cfg *config.Config, opts Options) (*Report, error) {
 	// Harness inventory.
 	harnessOrder := []string{}
 	allHarnesses := append(harness.BuildHarnesses(home, ""), harness.BuildExtendedHarnesses(home)...)
+	installOptions := harness.DefaultInstallOptions(home, "")
+	installedIDs := make(map[string]bool, len(allHarnesses))
+	for _, h := range harness.InstalledHarnesses(allHarnesses, installOptions) {
+		installedIDs[h.ID] = true
+	}
 	for _, h := range allHarnesses {
 		if h.ID == "" {
 			continue
 		}
 		_, detectErr := os.Stat(h.Detect)
 		detected := detectErr == nil
-		installed := false
-		if h.SkillUser != nil {
-			if _, sErr := os.Stat(filepath.Join(*h.SkillUser, "rolling-memory", "SKILL.md")); sErr == nil {
-				installed = true
-			}
-		}
-		if !installed {
-			for _, mcpPath := range []string{h.MCPPath, h.MCPLegacyPath} {
-				if mcpPath == "" {
-					continue
-				}
-				if raw, rErr := os.ReadFile(mcpPath); rErr == nil && strings.Contains(string(raw), "rolling-memory") {
-					installed = true
-					break
-				}
-			}
-		}
-		if (h.ID == "zcode" || h.ID == "claude-code") && detected {
-			installed = true
-		}
+		installed := installedIDs[h.ID]
 		status := "standby"
 		if installed {
 			status = "ready"
