@@ -904,6 +904,10 @@ func (e *Engine) queryWeights(queryHashes []uint64, qTerms map[uint64]Term) map[
 }
 
 // Hit 是一条命中的能量明细（全部为 Nats）。
+//
+// Direct 是直接通道（查询词项 + 短语 + 实体 + 结构 + 残差）。Hop1/Hop2 在默认
+// cluster pipeline 中分别是簇内 stSpread/stCorroboration，不是词项桥 hop；只有
+// fallback 路径才是 term-bridge 的一跳/二跳。归因报告必须按路径读这两个字段。
 type Hit struct {
 	UnitID string
 	Energy float64

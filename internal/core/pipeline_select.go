@@ -96,6 +96,28 @@ func SetProxPairProbe(fn func(pairs int)) { proxPairProbe = fn }
 // SetStructureCallProbe installs the structure-call hook; nil removes it.
 func SetStructureCallProbe(fn func(entries int)) { structureCallProbe = fn }
 
+// ChannelBreakdown is a read-only snapshot of the seven scoring channels for
+// one selected hit. It is populated only while SetChannelBreakdownProbe is
+// installed; production leaves the probe nil and pays one branch per hit.
+type ChannelBreakdown struct {
+	UnitID       string
+	Lex          float64
+	Phrase       float64
+	Entity       float64
+	Structure    float64
+	Remaining    float64
+	StSpread     float64
+	StCorrob     float64
+	ClonePenalty float64
+	Scale        float64
+	Energy       float64
+}
+
+var channelBreakdownProbe func(ChannelBreakdown)
+
+// SetChannelBreakdownProbe installs the selection-breakdown hook; nil removes it.
+func SetChannelBreakdownProbe(fn func(ChannelBreakdown)) { channelBreakdownProbe = fn }
+
 func (st *rmClusterState) rmProximityAndSynergy(c *rmCandidate, groups map[uint64]float64, total float64) (float64, float64) {
 	if total <= 0 || len(c.matches) < 2 {
 		return 0, 0
@@ -707,24 +729,43 @@ func (st *rmClusterState) selectClusterHits(idx *Index, sc *rmQueryScratch, cand
 			continue
 		}
 		direct := c.lex + c.phrase + c.entity + c.structure + best.remaining
-		hop1 := c.stSpread
-		hop2 := c.stCorrob
+		clusterSpread := c.stSpread
+		clusterCorroboration := c.stCorrob
 		if c.clonePenalty > 0 {
 			scale := math.Max(0, 1.0-cloneDampingKernel*c.clonePenalty)
 			direct *= scale
-			hop1 *= scale
-			hop2 *= scale
+			clusterSpread *= scale
+			clusterCorroboration *= scale
 		}
-		energy := direct + hop1 + hop2
+		energy := direct + clusterSpread + clusterCorroboration
 		if energy <= 0 {
 			continue
+		}
+		if channelBreakdownProbe != nil {
+			scale := 1.0
+			if c.clonePenalty > 0 {
+				scale = math.Max(0, 1.0-cloneDampingKernel*c.clonePenalty)
+			}
+			channelBreakdownProbe(ChannelBreakdown{
+				UnitID:       string([]byte(idx.UnitIDs[best.unit])),
+				Lex:          c.lex,
+				Phrase:       c.phrase,
+				Entity:       c.entity,
+				Structure:    c.structure,
+				Remaining:    best.remaining,
+				StSpread:     c.stSpread,
+				StCorrob:     c.stCorrob,
+				ClonePenalty: c.clonePenalty,
+				Scale:        scale,
+				Energy:       energy,
+			})
 		}
 		out = append(out, Hit{
 			UnitID: string([]byte(idx.UnitIDs[best.unit])),
 			Energy: energy,
 			Direct: direct,
-			Hop1:   hop1,
-			Hop2:   hop2,
+			Hop1:   clusterSpread,
+			Hop2:   clusterCorroboration,
 		})
 		for _, m := range c.matches {
 			coverage[m.group]++

@@ -1483,7 +1483,11 @@ func (e *Engine) canUseClusterPipeline() bool {
 	if idx == nil || idx.N == 0 || (len(idx.TermFlags) == 0 && len(idx.rawTermFlags) == 0 && e.clusterState == nil) {
 		return false
 	}
-	if e.Contraction || e.TimeKernel || e.Energy != EnergyMutualInfo || e.Hop1Budget <= 0 {
+	// ClusterPipeline is the only mode switch. Hop1Budget/Hop2Budget are
+	// fallback-spread work caps: a zero budget disables that hop, not the
+	// cluster pipeline. Keeping the budget out of this predicate prevents a
+	// silent full scoring-path change when an experiment sets hop1=0.
+	if e.Contraction || e.TimeKernel || e.Energy != EnergyMutualInfo {
 		return false
 	}
 	return true

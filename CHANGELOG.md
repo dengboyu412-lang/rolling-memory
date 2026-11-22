@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Recall keeps the clustered scoring path when an expansion budget is zero, instead of silently switching to the legacy scorer.
 - A recall call retries once when the local daemon retires between the health probe and the request, instead of returning a transient EOF.
 - Harness counts and their per-host cache now honor the `sync.since` ingest bound instead of reporting out-of-scope history as pending work.
 - Vault fingerprints and the secret-key fast path read the canonical document rows, and a vault upgraded from an older schema keeps its knowledge-trace columns.

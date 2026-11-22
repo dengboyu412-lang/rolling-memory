@@ -84,6 +84,35 @@ func stage4RenameInvarianceCanonicalKey(id string) string {
 // invariance: two corpora that differ only in the bystander pair's UnitID
 // strings (and hence only in unit-index assignment order) must deliver
 // bit-identical energies for every physically identical unit.
+// TestClusterPipelineModeIndependentOfHopBudget guards the mode switch:
+// ClusterPipeline alone selects the cluster pipeline; the fallback spread
+// budgets must never silently flip the whole scoring path.
+func TestClusterPipelineModeIndependentOfHopBudget(t *testing.T) {
+	docs, _ := stage4RenameInvarianceCorpus("mode")
+	eng := NewEngine(BuildIndex(docs))
+	eng.ensureClusterState()
+	if !eng.canUseClusterPipeline() {
+		t.Fatal("default cluster pipeline must be active")
+	}
+	eng.Hop1Budget = 0
+	if !eng.canUseClusterPipeline() {
+		t.Fatal("Hop1Budget=0 must not disable the cluster pipeline")
+	}
+	eng.Hop2Budget = 0
+	if !eng.canUseClusterPipeline() {
+		t.Fatal("Hop2Budget=0 must not disable the cluster pipeline")
+	}
+	eng.ClusterPipeline = false
+	if eng.canUseClusterPipeline() {
+		t.Fatal("ClusterPipeline=false must disable the cluster pipeline")
+	}
+	eng.ClusterPipeline = true
+	eng.TimeKernel = true
+	if eng.canUseClusterPipeline() {
+		t.Fatal("TimeKernel must keep the fallback compatibility gate")
+	}
+}
+
 func TestStage4UnitIDRenameEnergyInvarianceAdversarial(t *testing.T) {
 	run := func(prefix string) map[string]Hit {
 		docs, query := stage4RenameInvarianceCorpus(prefix)
